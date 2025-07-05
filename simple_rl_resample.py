@@ -73,7 +73,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
     rl_sampling_params = SamplingParams(
         temperature=args.temperature_rl,
         top_p=args.top_p_rl,
-        max_tokens=1,
+        max_tokens=args.rl_tokens,
         seed=args.seed,
         logprobs=args.num_logprobs,
         skip_special_tokens=False
@@ -82,7 +82,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
     all_info = {}
     for step in range(args.max_rl_resample + 1):
         entropy_thresholds = None if step == 0 or args.dyna_thresh else entropy_thresholds
-        print(f"\n--- Iteration {step + 1} ---\n")
+        print(f"\n--- Iteration {step} ---\n")
         # Generate base model outputs
         if step == 0:
             base_outputs = generate_with_formatted_return(base_model, initial_prompts, init_base_sampling_params)
@@ -133,14 +133,17 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
         rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses = rl_outputs
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
-            if args.use_id:
-                resample_token = rl_generated_tokens[idx][0]
-                current_prompts[idx] = cur_rl_prompt + [resample_token]
-            else:
-                current_prompts[idx] = cur_rl_prompt + rl_responses[idx]
+            # replace until entropy is lower than threshold or only one token is resampled
+            end_idx = 1
+            while end_idx < args.rl_tokens and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
+                end_idx += 1
+            replace_tokens = rl_generated_tokens[idx][:end_idx]
+            current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
+                                   cur_rl_prompt + tokenizer.decode(replace_tokens)
             # log
             if idx == 0:
-                print(f"RL resampled token: [{rl_responses[idx]}], entropy: {rl_entropies[idx][0]:.4f}, ")
+                print(f"RL resampled: [{rl_responses[idx]}], entropies: {rl_entropies[idx]},"\
+                      f"selected for replace: [{tokenizer.decode(replace_tokens)}] (idx<{end_idx}).")
 
         # record info
         info_list, avg_accs = [], []
