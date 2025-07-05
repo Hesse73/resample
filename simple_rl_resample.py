@@ -110,10 +110,6 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         for idx, cur_prompt in enumerate(current_prompts):
             cur_entropies = np.array(base_entropies[idx])
             cur_generated_tokens = base_generated_tokens[idx]
-            # if len(entropy_thresholds) < idx + 1:
-            #     # compute the entropy threshold if not already computed
-            #     threshold = np.percentile(cur_entropies, 100 * (1 - args.top_ent))
-            #     entropy_thresholds.append(threshold)
             threshold = entropy_thresholds[idx]
             high_entropy_indices = np.where(cur_entropies >= threshold)[0]
             # skip the prefix tokens at the first step
