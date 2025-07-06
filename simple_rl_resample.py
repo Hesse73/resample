@@ -27,6 +27,13 @@ def format_vllm_logp(logprobs, tokenizer):
         return {id_:(lp.logprob, tokenizer.decode([id_])) for id_,lp in logprobs.items()}
     else:
         raise ValueError(f"Unsupported logprobs type: {type(logprobs)} for logprobs:\n{logprobs}\nExpected list or dict.")
+    
+def get_another_top_token(logprobs, skip_id):
+    sorted_tokens = sorted(logprobs.items(), key=lambda x: x[1].logprob, reverse=True)
+    for token, lp in sorted_tokens:
+        if token != skip_id:
+            return token
+    return None
 
 def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampling_params: SamplingParams,
                                    return_format="processed"):
@@ -76,7 +83,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         max_tokens=args.rl_tokens,
         seed=args.seed,
         logprobs=args.num_logprobs,
-        skip_special_tokens=False
+        skip_special_tokens=True  # skip special tokens for RL model
     )
 
     all_info = {}
@@ -138,6 +145,21 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
                 end_idx += 1
             replace_tokens = rl_generated_tokens[idx][:end_idx]
+            if replace_tokens[-1] == tokenizer.eos_token_id:
+                # Handling eot token, remove is preferred.
+                if args.eot_replace == "keep":
+                    pass # do nothing, keep the <|endoftext|> token
+                elif args.eot_replace == "remove":
+                    replace_tokens = replace_tokens[:-1]
+                    end_idx -= 1  # since we removed the last token, we need to adjust the end index
+                elif args.eot_replace == "replace":
+                    last_logprobs = rl_logprobs[idx][:end_idx][-1]
+                    another_top_token = get_another_top_token(last_logprobs, tokenizer.eos_token_id)
+                    if another_top_token is not None:
+                        replace_tokens[-1] = another_top_token  # replace <|endoftext|> with another top token
+                    else:
+                        print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
+
             current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
                                    cur_rl_prompt + tokenizer.decode(replace_tokens)
             # log
@@ -174,7 +196,9 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 "replacements": p_replace_infos,
             })
             avg_accs.append(np.mean(acc_list))
-        print(f"Average accuracy for step {step}: {np.mean(avg_accs):.4f} (over {len(prompts)} prompts)")
+        print(f"** Step {step} Summary **\n")
+        print(f"Average accuracy: {np.mean(avg_accs):.4f}")
+        print(f"Average length kept: {np.mean(high_entropy_idxs):.2f}\n")
         all_info[f'step_{step}'] = info_list
     return all_info
 
@@ -216,19 +240,20 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1, help="Random seed for reproducibility")
     parser.add_argument("--num_logprobs", type=int, default=50, help="Number of logprobs to return")
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size for vLLM")
-    parser.add_argument("--base_mem", type=float, default=0.6, help="GPU memory utilization for vLLM")
+    parser.add_argument("--base_mem", type=float, default=0.5, help="GPU memory utilization for vLLM")
     parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
-    parser.add_argument("--enforce_eager", type=int, default=1, help="Whether to enforce eager execution in vLLM (1 for True, 0 for False)")
     # RESAMPLING PARAMETERS
-    parser.add_argument("--use_id", type=int, default=0, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
+    parser.add_argument("--use_id", type=int, default=1, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
     parser.add_argument("--top_ent", type=float, default=0.05, help="Top entropy percentage for selecting high-entropy tokens")
     parser.add_argument("--dyna_thresh", type=int, default=0, help="Whether to use dynamic thresholding for entropy selection")
-    parser.add_argument("--thresh_level", type=str, default="response", choices=["response", "prompt", "dataset"], help="Level for entropy thresholding")
+    parser.add_argument("--thresh_level", type=str, default="prompt", choices=["response", "prompt", "dataset"], help="Level for entropy thresholding")
     parser.add_argument("--rl_tokens", type=int, default=1, help="Number of tokens to resample with RL model at each time")
-    parser.add_argument("--num_prefix_keep", type=int, default=20, help="Number of prefix tokens to keep in the first step")
-    parser.add_argument("--include_prefix", action='store_true', help="Whether to include RL prefix pattern in the beginning") 
+    parser.add_argument("--num_prefix_keep", type=int, default=0, help="Number of prefix tokens to keep in the first step")
+    parser.add_argument("--include_prefix", type=int, default=1, help="Whether to include RL prefix pattern in the beginning") 
+    parser.add_argument("--eot_replace", type=str, default="remove", choices=["keep", "replace", "remove"],
+                        help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
     parser.add_argument("--save_dir", type=str, default="resample_results")
     args = parser.parse_args()
@@ -236,7 +261,7 @@ if __name__ == "__main__":
     if not os.path.exists(args.save_dir): os.makedirs(args.save_dir)
     save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}"  # model & ds info
     save_name += f"-resample{args.max_rl_resample}-top_ent{args.top_ent}-dyna_thresh{args.dyna_thresh}-{args.thresh_level}_thresh"  # resampling info
-    save_name += f"-prefix{args.num_prefix_keep}-use_chat{args.use_chat}-rl_tokens{args.rl_tokens}"  # resampling info
+    save_name += f"-prefix{args.num_prefix_keep}-use_chat{args.use_chat}-rl_tokens{args.rl_tokens}-{args.eot_replace}_eot"  # resampling info
     save_name += f"-top_p_base{args.top_p_base}-top_p_rl{args.top_p_rl}-t_base{args.temperature_base}-t_rl{args.temperature_rl}"  
     args.save_file = os.path.join(args.save_dir, f"{save_name}.json")
     print(f"Results will be saved to: {args.save_file}")
@@ -244,9 +269,9 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     dataset = load_dataset(args.dataset, split="train")
     base_model = LLM(model=args.base_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=args.enforce_eager)
+                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True)
     rl_model = LLM(model=args.rl_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=args.enforce_eager)
+                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True)
 
     run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer')
 
