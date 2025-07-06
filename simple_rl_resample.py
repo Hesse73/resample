@@ -111,7 +111,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             cur_entropies = np.array(base_entropies[idx])
             cur_generated_tokens = base_generated_tokens[idx]
             threshold = entropy_thresholds[idx]
-            high_entropy_indices = np.where(cur_entropies >= threshold)[0]
+            high_entropy_indices = np.where(cur_entropies > threshold)[0]
             # skip the prefix tokens at the first step
             if step == 0: high_entropy_indices = high_entropy_indices[high_entropy_indices >= args.num_prefix_keep]
             # if no high-entropy token over the threshold, use the highest entropy token
@@ -135,7 +135,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
             # replace until entropy is lower than threshold or only one token is resampled
             end_idx = 1
-            while end_idx < args.rl_tokens and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
+            while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
                 end_idx += 1
             replace_tokens = rl_generated_tokens[idx][:end_idx]
             current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
@@ -219,6 +219,7 @@ if __name__ == "__main__":
     parser.add_argument("--base_mem", type=float, default=0.6, help="GPU memory utilization for vLLM")
     parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
+    parser.add_argument("--enforce_eager", type=int, default=1, help="Whether to enforce eager execution in vLLM (1 for True, 0 for False)")
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_id", type=int, default=0, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
@@ -243,9 +244,9 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     dataset = load_dataset(args.dataset, split="train")
     base_model = LLM(model=args.base_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True)
+                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=args.enforce_eager)
     rl_model = LLM(model=args.rl_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True)
+                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=args.enforce_eager)
 
     run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer')
 
