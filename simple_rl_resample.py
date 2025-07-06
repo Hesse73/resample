@@ -218,7 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size for vLLM")
     parser.add_argument("--base_mem", type=float, default=0.6, help="GPU memory utilization for vLLM")
     parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
-    parser.add_argument("--use_chat", type=int, default=1, help="Whether to use chat template (1 for chat, 0 for text prompts)")
+    parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_id", type=int, default=0, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
