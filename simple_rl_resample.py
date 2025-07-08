@@ -207,7 +207,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 "accs": acc_list,
                 "entropy_thresholds": entropy_thresholds[start:end],
                 "replacements": p_replace_infos,
-                "next_prefix": current_prompts[start:end] if step == args.max_rl_resample else [],
+                "final_prefixs": current_prompts[start:end] if step == args.max_rl_resample else None,
             })
             avg_accs.append(np.mean(acc_list))
         print(f"** Step {step} Summary **\n")
