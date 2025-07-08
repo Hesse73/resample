@@ -161,7 +161,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                         print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
 
             current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
-                                   cur_rl_prompt + tokenizer.decode(replace_tokens)
+                                   cur_rl_prompt + tokenizer.decode(replace_tokens, skip_special_tokens=True)
             # log
             if idx == 0:
                 print(f"RL resampled: [{rl_responses[idx]}], entropies: {rl_entropies[idx]},"\
@@ -172,6 +172,11 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         for idx, gt in enumerate(gts):
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
+            # full responses
+            if args.use_id:
+                p_full_responses = [tokenizer.decode(current_prompts[i] + base_generated_tokens[i]) for i in range(start, end)]
+            else:
+                p_full_responses = [current_prompts[i] + base_responses[i] for i in range(start, end)]
             p_replace_infos = []  # record each response's replacement info
             for global_idx in range(start, end):
                 replace_idx = high_entropy_idxs[global_idx]
@@ -185,11 +190,12 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                     "resampled_logprobs": format_vllm_logp(rl_logprobs[global_idx], tokenizer),
                 })
             # calculate the accs
-            acc_list, pred_answers = get_acc_list(p_responses, gt, True)
+            acc_list, pred_answers = get_acc_list(p_full_responses, gt, True)
             info_list.append({
                 "prompt": prompts[idx],
                 "ground_truth": gt,
                 "responses": p_responses,
+                "full_responses": p_full_responses,
                 "pred_answers": pred_answers,
                 "accs": acc_list,
                 "entropy_thresholds": entropy_thresholds[start:end],
@@ -242,8 +248,8 @@ if __name__ == "__main__":
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size for vLLM")
     parser.add_argument("--base_mem", type=float, default=0.5, help="GPU memory utilization for vLLM")
     parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
-    parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     # RESAMPLING PARAMETERS
+    parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     parser.add_argument("--use_id", type=int, default=1, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
     parser.add_argument("--top_ent", type=float, default=0.05, help="Top entropy percentage for selecting high-entropy tokens")
@@ -262,7 +268,7 @@ if __name__ == "__main__":
     save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}"  # model & ds info
     save_name += f"-resample{args.max_rl_resample}-top_ent{args.top_ent}-dyna_thresh{args.dyna_thresh}-{args.thresh_level}_thresh"  # resampling info
     save_name += f"-prefix{args.num_prefix_keep}-use_chat{args.use_chat}-rl_tokens{args.rl_tokens}-{args.eot_replace}_eot"  # resampling info
-    save_name += f"-top_p_base{args.top_p_base}-top_p_rl{args.top_p_rl}-t_base{args.temperature_base}-t_rl{args.temperature_rl}"  
+    save_name += f"-top_p_base{args.top_p_base}-top_p_rl{args.top_p_rl}-t_base{args.temperature_base}-t_rl{args.temperature_rl}-n{args.n}"  # sampling params
     args.save_file = os.path.join(args.save_dir, f"{save_name}.json")
     print(f"Results will be saved to: {args.save_file}")
 
