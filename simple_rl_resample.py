@@ -142,8 +142,13 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
             # replace until entropy is lower than threshold or only one token is resampled
             end_idx = 1
-            while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
-                end_idx += 1
+            if args.rl_tokens_stop == "hard":
+                while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
+                    end_idx += 1
+            elif args.rl_tokens_stop == "mean":
+                mean_entropies = np.array([np.mean(rl_entropies[idx][:j+1]) for j in range(len(rl_entropies[idx]))])
+                valid_idxs = np.where(mean_entropies >= entropy_thresholds[idx])[0]
+                end_idx = int(valid_idxs[-1]) + 1 if len(valid_idxs) > 0 else 1  # at least replace one token
             replace_tokens = rl_generated_tokens[idx][:end_idx]
             if replace_tokens[-1] == tokenizer.eos_token_id:
                 # Handling eot token, remove is preferred.
@@ -170,7 +175,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                       f"selected for replace: [{tokenizer.decode(replace_tokens)}] (idx<{end_idx}).")
 
         # record info
-        info_list, avg_accs = [], []
+        info_list, avg_accs, final_prefixs = [], [], []
         for idx, gt in enumerate(gts):
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
@@ -202,6 +207,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 "accs": acc_list,
                 "entropy_thresholds": entropy_thresholds[start:end],
                 "replacements": p_replace_infos,
+                "next_prefix": current_prompts[start:end] if step == args.max_rl_resample else [],
             })
             avg_accs.append(np.mean(acc_list))
         print(f"** Step {step} Summary **\n")
@@ -258,6 +264,7 @@ if __name__ == "__main__":
     parser.add_argument("--dyna_thresh", type=int, default=0, help="Whether to use dynamic thresholding for entropy selection")
     parser.add_argument("--thresh_level", type=str, default="prompt", choices=["response", "prompt", "dataset"], help="Level for entropy thresholding")
     parser.add_argument("--rl_tokens", type=int, default=1, help="Number of tokens to resample with RL model at each time")
+    parser.add_argument("--rl_tokens_stop", type=str, default="hard", choices=["hard", "mean"], help="RL resampled tokens stopping strategies")
     parser.add_argument("--num_prefix_keep", type=int, default=0, help="Number of prefix tokens to keep in the first step")
     parser.add_argument("--include_prefix", type=int, default=1, help="Whether to include RL prefix pattern in the beginning") 
     parser.add_argument("--eot_replace", type=str, default="remove", choices=["keep", "replace", "remove"],
@@ -267,10 +274,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(f"Arguments: {args}")
     if not os.path.exists(args.save_dir): os.makedirs(args.save_dir)
-    save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}"  # model & ds info
-    save_name += f"-resample{args.max_rl_resample}-top_ent{args.top_ent}-dyna_thresh{args.dyna_thresh}-{args.thresh_level}_thresh"  # resampling info
-    save_name += f"-prefix{args.num_prefix_keep}-use_chat{args.use_chat}-rl_tokens{args.rl_tokens}-{args.eot_replace}_eot"  # resampling info
-    save_name += f"-top_p_base{args.top_p_base}-top_p_rl{args.top_p_rl}-t_base{args.temperature_base}-t_rl{args.temperature_rl}-n{args.n}"  # sampling params
+    threshold_name = f"{'dyna' if args.dyna_thresh else 'fixed'}_{args.thresh_level}_thresh"
+    rl_tokens_name = f"{args.rl_tokens}_rl_tokens-stop_by_{args.rl_tokens_stop}"
+    save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}-seed{args.seed}-resample{args.max_rl_resample}"
+    save_name += f"-top_ent{args.top_ent}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
+    save_name += f"-keep_{args.num_prefix_keep}_prefix-top_p_{args.top_p_base}_{args.top_p_rl}-t_{args.temperature_base}_{args.temperature_rl}-n{args.n}"
     args.save_file = os.path.join(args.save_dir, f"{save_name}.json")
     print(f"Results will be saved to: {args.save_file}")
 
