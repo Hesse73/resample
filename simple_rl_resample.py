@@ -161,7 +161,9 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                         print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
 
             current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
-                                   cur_rl_prompt + tokenizer.decode(replace_tokens, skip_special_tokens=True)
+                                   cur_rl_prompt + tokenizer.decode(replace_tokens)
+            if tokenizer.decode(replace_tokens) != tokenizer.decode(replace_tokens, skip_special_tokens=True):
+                print(f"Warning: The replacement tokens ({tokenizer.decode(replace_tokens)}) contain special tokens.")
             # log
             if idx == 0:
                 print(f"RL resampled: [{rl_responses[idx]}], entropies: {rl_entropies[idx]},"\
