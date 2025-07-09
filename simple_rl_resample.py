@@ -16,6 +16,7 @@ from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 from transformers import AutoTokenizer
 from typing import List, Tuple
+from copy import deepcopy
 
 from math_utils import get_acc_list
 
@@ -62,10 +63,22 @@ def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampl
     else:
         return outputs
 
-def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoTokenizer, prompts: List[str], gts: List[str]):
+def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoTokenizer, prompts: List[str], gts: List[str],
+                          continue_info=None):
     # flatten the prompts and repeat each n times
     initial_prompts = [tokenizer.encode(p, add_special_tokens=False) for p in prompts] if args.use_id else prompts
-    current_prompts = sum([[p]*args.n for p in initial_prompts], [])
+    
+    if continue_info is not None and args.continue_from > 0:
+        print(f"--- Resuming from step {args.continue_from} ---")
+        start_step, all_info = args.continue_from + 1, continue_info
+        # load the previous step's info
+        prev_info = continue_info[f'step_{args.continue_from}']
+        # extract the final prefixs as the current prompts, and restore the entropy thresholds
+        current_prompts = sum([p_info['final_prefixs'] for p_info in prev_info] ,[])
+        entropy_thresholds = sum([p_info['entropy_thresholds'] for p_info in prev_info], [])
+    else:
+        start_step, all_info = 0, {}
+        current_prompts = sum([[p]*args.n for p in initial_prompts], [])
 
     base_sampling_params = SamplingParams(
         temperature=args.temperature_base,
@@ -86,8 +99,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         skip_special_tokens=True  # skip special tokens for RL model
     )
 
-    all_info = {}
-    for step in range(args.max_rl_resample + 1):
+    for step in range(start_step, args.max_rl_resample + 1):
         entropy_thresholds = None if step == 0 or args.dyna_thresh else entropy_thresholds
         print(f"\n--- Iteration {step} ---\n")
         # Generate base model outputs
@@ -175,7 +187,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                       f"selected for replace: [{tokenizer.decode(replace_tokens)}] (idx<{end_idx}).")
 
         # record info
-        info_list, avg_accs, final_prefixs = [], [], []
+        info_list, avg_accs = [], []
         for idx, gt in enumerate(gts):
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
@@ -218,7 +230,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
 
 
 def run_exp_aime(args:argparse.Namespace, base_model: LLM, rl_model: LLM, tokenizer:AutoTokenizer, 
-                 ds:datasets.Dataset, prompt_key='problem', gt_key='answer'):
+                 ds:datasets.Dataset, prompt_key='problem', gt_key='answer', continue_info=None):
     # Prepare prompts
     suffix = "\nPlease reason step by step, and put your final answer within \\boxed{}."
     gen_prefix = "To approach this problem" if args.include_prefix else ""
@@ -230,7 +242,7 @@ def run_exp_aime(args:argparse.Namespace, base_model: LLM, rl_model: LLM, tokeni
     print(f"Total prompts: {len(prompts)}.\nExample:\n{prompts[0]}")
     # Prepare ground truths and run iterative resampling
     gts = ds[gt_key]
-    ret_info = iterative_rl_resample(args, base_model, rl_model, tokenizer, prompts, gts)
+    ret_info = iterative_rl_resample(args, base_model, rl_model, tokenizer, prompts, gts, continue_info=continue_info)
 
     # Save results
     with open(args.save_file, 'w') as f:
@@ -271,16 +283,30 @@ if __name__ == "__main__":
                         help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
     parser.add_argument("--save_dir", type=str, default="resample_results")
+    parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
     if not os.path.exists(args.save_dir): os.makedirs(args.save_dir)
-    threshold_name = f"{'dyna' if args.dyna_thresh else 'fixed'}_{args.thresh_level}_thresh"
-    rl_tokens_name = f"{args.rl_tokens}_rl_tokens-stop_by_{args.rl_tokens_stop}"
-    save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}-seed{args.seed}-resample{args.max_rl_resample}"
-    save_name += f"-top_ent{args.top_ent}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
-    save_name += f"-keep_{args.num_prefix_keep}_prefix-top_p_{args.top_p_base}_{args.top_p_rl}-t_{args.temperature_base}_{args.temperature_rl}-n{args.n}"
-    args.save_file = os.path.join(args.save_dir, f"{save_name}.json")
+    def get_filename(args:argparse.Namespace):
+        threshold_name = f"{'dyna' if args.dyna_thresh else 'fixed'}_{args.thresh_level}_thresh"
+        rl_tokens_name = f"{args.rl_tokens}_rl_tokens-stop_by_{args.rl_tokens_stop}"
+        save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}-seed{args.seed}-resample{args.max_rl_resample}"
+        save_name += f"-top_ent{args.top_ent}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
+        save_name += f"-keep_{args.num_prefix_keep}_prefix-top_p_{args.top_p_base}_{args.top_p_rl}-t_{args.temperature_base}_{args.temperature_rl}-n{args.n}"
+        return os.path.join(args.save_dir, f"{save_name}.json")
+    args.save_file = get_filename(args)
     print(f"Results will be saved to: {args.save_file}")
+
+    # handling continue from a specific step
+    if args.continue_from > 0:
+        args_copied = deepcopy(args)
+        args_copied.max_rl_resample = args.continue_from
+        load_from_file = get_filename(args_copied)
+        if not os.path.exists(load_from_file):
+            raise FileNotFoundError(f"Cannot continue from step {args.continue_from}, since file {load_from_file} does not exist.")
+        print(f"Continuing from step {args.continue_from}, loading from {load_from_file}")
+        with open(load_from_file, 'r') as f:
+            continue_info = json.load(f)
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     dataset = load_dataset(args.dataset, split="train")
@@ -289,5 +315,5 @@ if __name__ == "__main__":
     rl_model = LLM(model=args.rl_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
                    gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True)
 
-    run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer')
+    run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer', continue_info=continue_info)
 
