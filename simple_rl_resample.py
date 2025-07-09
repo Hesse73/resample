@@ -66,7 +66,7 @@ def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampl
 def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoTokenizer, prompts: List[str], gts: List[str],
                           continue_info=None):
     # flatten the prompts and repeat each n times
-    initial_prompts = [tokenizer.encode(p, add_special_tokens=False) for p in prompts] if args.use_id else prompts
+    initial_prompts = [tokenizer.encode(p, add_special_tokens=False) for p in prompts]
     
     if continue_info is not None and args.continue_from > 0:
         print(f"--- Resuming from step {args.continue_from} ---")
@@ -136,15 +136,12 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             # if no high-entropy token over the threshold, use the highest entropy token
             if len(high_entropy_indices) == 0: high_entropy_indices = [np.argmax(cur_entropies)]
             high_entropy_idx = int(high_entropy_indices[0])  # Take the first high-entropy token index
-            if args.use_id:
-                prefix_for_rl = cur_prompt + cur_generated_tokens[:high_entropy_idx]
-            else:
-                prefix_for_rl = cur_prompt + tokenizer.decode(cur_generated_tokens[:high_entropy_idx])
+            prefix_for_rl = cur_prompt + cur_generated_tokens[:high_entropy_idx]
             high_entropy_idxs.append(high_entropy_idx)
             prefixs_for_rl.append(prefix_for_rl)
             # log
             if idx == 0:
-                print(f"Prefix for RL: {tokenizer.decode(prefix_for_rl) if args.use_id else prefix_for_rl}")
+                print(f"Prefix for RL: {tokenizer.decode(prefix_for_rl)}")
                 print(f"Selected token: [{tokenizer.decode([cur_generated_tokens[high_entropy_idx]])}], " \
                       f"entropy: {cur_entropies[high_entropy_idx]:.4f}, Threshold: {threshold:.4f}")
     
@@ -177,8 +174,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                     else:
                         print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
 
-            current_prompts[idx] = cur_rl_prompt + replace_tokens if args.use_id else \
-                                   cur_rl_prompt + tokenizer.decode(replace_tokens)
+            current_prompts[idx] = cur_rl_prompt + replace_tokens
             if tokenizer.decode(replace_tokens) != tokenizer.decode(replace_tokens, skip_special_tokens=True):
                 print(f"Warning: The replacement tokens ({tokenizer.decode(replace_tokens)}) contain special tokens.")
             # log
@@ -192,10 +188,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
             # full responses
-            if args.use_id:
-                p_full_responses = [tokenizer.decode(current_prompts[i] + base_generated_tokens[i]) for i in range(start, end)]
-            else:
-                p_full_responses = [current_prompts[i] + base_responses[i] for i in range(start, end)]
+            p_full_responses = [tokenizer.decode(current_prompts[i] + base_generated_tokens[i]) for i in range(start, end)]
             p_replace_infos = []  # record each response's replacement info
             for global_idx in range(start, end):
                 replace_idx = high_entropy_idxs[global_idx]
@@ -270,7 +263,6 @@ if __name__ == "__main__":
     parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
-    parser.add_argument("--use_id", type=int, default=1, help="Whether to use token IDs instead of text prompts (1 for IDs, 0 for text)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
     parser.add_argument("--top_ent", type=float, default=0.05, help="Top entropy percentage for selecting high-entropy tokens")
     parser.add_argument("--dyna_thresh", type=int, default=0, help="Whether to use dynamic thresholding for entropy selection")
