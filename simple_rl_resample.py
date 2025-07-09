@@ -138,6 +138,9 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             high_entropy_idx = int(high_entropy_indices[0])  # Take the first high-entropy token index
             prefix_for_rl = cur_prompt + cur_generated_tokens[:high_entropy_idx]
             high_entropy_idxs.append(high_entropy_idx)
+            # NOTE: there is no need for the prefix_for_rl (prompt + response[:idx]) to be truncated, 
+            # since we have: len(prompt) + len(response) <= tokenizer.model_max_length + 1
+            # and for idx < len(response), we have len(prompt) + len(response[:idx]) <= tokenizer.model_max_length
             prefixs_for_rl.append(prefix_for_rl)
             # log
             if idx == 0:
@@ -175,6 +178,12 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                         print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
 
             current_prompts[idx] = cur_rl_prompt + replace_tokens
+            # handle longer than context length (lazy)
+            # NOTE: base model's response to the max-length prompt will be a single token, which will be removed for RL resampling,
+            # then any RL-resampled tokens will be truncated again in the following lines, so the current prompt will keep unchanged
+            if len(current_prompts[idx]) > tokenizer.model_max_length:
+                print(f"Warning: Truncating prompt to fit model max length ({len(current_prompts[idx])} > {tokenizer.model_max_length}).")
+                current_prompts[idx] = current_prompts[idx][:tokenizer.model_max_length]
             if tokenizer.decode(replace_tokens) != tokenizer.decode(replace_tokens, skip_special_tokens=True):
                 print(f"Warning: The replacement tokens ({tokenizer.decode(replace_tokens)}) contain special tokens.")
             # log
@@ -264,7 +273,7 @@ if __name__ == "__main__":
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
-    parser.add_argument("--top_ent", type=float, default=0.05, help="Top entropy percentage for selecting high-entropy tokens")
+    parser.add_argument("--top_ent", type=float, default=0.1, help="Top entropy percentage for selecting high-entropy tokens")
     parser.add_argument("--dyna_thresh", type=int, default=0, help="Whether to use dynamic thresholding for entropy selection")
     parser.add_argument("--thresh_level", type=str, default="prompt", choices=["response", "prompt", "dataset"], help="Level for entropy thresholding")
     parser.add_argument("--rl_tokens", type=int, default=1, help="Number of tokens to resample with RL model at each time")
@@ -290,6 +299,7 @@ if __name__ == "__main__":
     print(f"Results will be saved to: {args.save_file}")
 
     # handling continue from a specific step
+    continue_info = None
     if args.continue_from > 0:
         args_copied = deepcopy(args)
         args_copied.max_rl_resample = args.continue_from
