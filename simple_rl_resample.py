@@ -67,6 +67,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                           continue_info=None):
     # flatten the prompts and repeat each n times
     initial_prompts = [tokenizer.encode(p, add_special_tokens=False) for p in prompts]
+    MAX_MODEL_LEN = base_model.llm_engine.model_config.max_model_len
     
     if continue_info is not None and args.continue_from > 0:
         print(f"--- Resuming from step {args.continue_from} ---")
@@ -139,8 +140,8 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             prefix_for_rl = cur_prompt + cur_generated_tokens[:high_entropy_idx]
             high_entropy_idxs.append(high_entropy_idx)
             # NOTE: there is no need for the prefix_for_rl (prompt + response[:idx]) to be truncated, 
-            # since we have: len(prompt) + len(response) <= tokenizer.model_max_length + 1
-            # and for idx < len(response), we have len(prompt) + len(response[:idx]) <= tokenizer.model_max_length
+            # since we have: len(prompt) + len(response) <= MAX_MODEL_LEN + 1
+            # and for idx < len(response), we have len(prompt) + len(response[:idx]) <= MAX_MODEL_LEN
             prefixs_for_rl.append(prefix_for_rl)
             # log
             if idx == 0:
@@ -183,9 +184,9 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             # handle longer than context length (lazy)
             # NOTE: base model's response to the max-length prompt will be a single token, which will be removed for RL resampling,
             # then any RL-resampled tokens will be truncated again in the following lines, so the current prompt will keep unchanged
-            if len(current_prompts[idx]) > tokenizer.model_max_length:
-                print(f"Warning: Truncating prompt to fit model max length ({len(current_prompts[idx])} > {tokenizer.model_max_length}).")
-                current_prompts[idx] = current_prompts[idx][:tokenizer.model_max_length]
+            if len(current_prompts[idx]) > MAX_MODEL_LEN:
+                print(f"Warning: Truncating prompt to fit model max length ({len(current_prompts[idx])} > {MAX_MODEL_LEN}).")
+                current_prompts[idx] = current_prompts[idx][:MAX_MODEL_LEN]
             if tokenizer.decode(replace_tokens) != tokenizer.decode(replace_tokens, skip_special_tokens=True):
                 print(f"Warning: The replacement tokens ({tokenizer.decode(replace_tokens)}) contain special tokens.")
             # log
