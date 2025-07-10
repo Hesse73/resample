@@ -151,6 +151,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         # RL model resampling
         rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
         rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses = rl_outputs
+        rl_resample_end_idxs = []
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
             # replace until entropy is lower than threshold or only one token is resampled
             end_idx = 1
@@ -178,6 +179,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                         print(f"Warning: No alternative token found to replace <|endoftext|> in RL resampling.")
 
             current_prompts[idx] = cur_rl_prompt + replace_tokens
+            rl_resample_end_idxs.append(end_idx)  # record the end index for each prompt
             # handle longer than context length (lazy)
             # NOTE: base model's response to the max-length prompt will be a single token, which will be removed for RL resampling,
             # then any RL-resampled tokens will be truncated again in the following lines, so the current prompt will keep unchanged
@@ -206,6 +208,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                     "replace_token": tokenizer.decode([base_generated_tokens[global_idx][replace_idx]]),
                     "replace_entropy": base_entropies[global_idx][replace_idx],
                     "replace_logprobs": format_vllm_logp(base_logprobs[global_idx][replace_idx], tokenizer),
+                    "resampled_end_idx": rl_resample_end_idxs[global_idx],
                     "resampled_response": rl_responses[global_idx],
                     "resampled_entropies": rl_entropies[global_idx],
                     "resampled_logprobs": format_vllm_logp(rl_logprobs[global_idx], tokenizer),
