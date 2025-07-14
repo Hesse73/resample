@@ -200,7 +200,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
             # full responses
-            p_full_responses = [tokenizer.decode(current_prompts[i] + base_generated_tokens[i]) for i in range(start, end)]
+            p_full_responses = [tokenizer.decode(prefixs_for_rl[i] + base_generated_tokens[i][high_entropy_idxs[i]:]) for i in range(start, end)]
             p_replace_infos = []  # record each response's replacement info
             for global_idx in range(start, end):
                 replace_idx = high_entropy_idxs[global_idx]
