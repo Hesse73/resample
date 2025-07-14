@@ -211,6 +211,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                     "replace_logprobs": format_vllm_logp(base_logprobs[global_idx][replace_idx], tokenizer),
                     "resampled_end_idx": rl_resample_end_idxs[global_idx],
                     "resampled_response": rl_responses[global_idx],
+                    "resampled_tokens": rl_generated_tokens[global_idx],
                     "resampled_entropies": rl_entropies[global_idx],
                     "resampled_logprobs": format_vllm_logp(rl_logprobs[global_idx], tokenizer),
                 })
