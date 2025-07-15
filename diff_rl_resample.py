@@ -46,10 +46,16 @@ def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampl
         all_entropies = []
         all_logprobs = []
         all_generated_tokens = []
+        next_token_logprobs = []
+        next_token_ranks = []
         for output in tqdm(outputs, desc="processing outputs"):
             for out in output.outputs:
                 entropies = []
-                for lp_per_token in out.logprobs:
+                token_logprobs, token_ranks = [], []
+                for cur_tok, lp_per_token in zip(out.token_ids, out.logprobs):
+                    cur_tok_info = lp_per_token[cur_tok]
+                    token_logprobs.append(cur_tok_info.logprob)
+                    token_ranks.append(cur_tok_info.rank)
                     with torch.no_grad():
                         logprobs = torch.tensor([lp.logprob for lp in lp_per_token.values()])
                         logprobs_norm = logprobs - torch.logsumexp(logprobs, dim=-1)  # Normalize logprobs
@@ -59,9 +65,34 @@ def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampl
                 all_entropies.append(entropies)
                 all_logprobs.append(out.logprobs)
                 all_generated_tokens.append(out.token_ids)
-        return all_entropies, all_logprobs, all_generated_tokens, all_texts
+                next_token_logprobs.append(token_logprobs)
+                next_token_ranks.append(token_ranks)
+        return all_entropies, all_logprobs, all_generated_tokens, all_texts, next_token_logprobs, next_token_ranks
     else:
         return outputs
+
+def inference_on_prompts(llm: LLM, prompts: List[str|List[int]], sampling_params: SamplingParams,
+                         start_idxs:List[int]):
+    assert sampling_params.n == 1
+    assert len(prompts) == len(start_idxs)
+    if isinstance(prompts[0], list):
+        prompts = [TokensPrompt(prompt_token_ids=p) for p in prompts]
+    outputs = []
+    for prompt in tqdm(prompts, desc="Inference on prompts"):
+        cur_outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=False)
+        outputs.append(cur_outputs[0])
+    # outputs = llm.generate(prompts, sampling_params=sampling_params)
+    all_token_logprobs, all_token_ranks = [], []
+    for start_idx, output in zip(start_idxs, outputs):
+        prompt_token_ids = output.prompt_token_ids[start_idx:]
+        prompt_logprobs = output.prompt_logprobs[start_idx:]
+        valid_token_logprobs, valid_token_ranks = [], []
+        for tok, lp_per_token in zip(prompt_token_ids, prompt_logprobs):
+            valid_token_logprobs.append(lp_per_token[tok].logprob)
+            valid_token_ranks.append(lp_per_token[tok].rank)
+        all_token_logprobs.append(valid_token_logprobs)
+        all_token_ranks.append(valid_token_ranks)
+    return all_token_logprobs, all_token_ranks
 
 def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoTokenizer, prompts: List[str], gts: List[str],
                           continue_info=None):
@@ -99,6 +130,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         logprobs=args.num_logprobs,
         skip_special_tokens=True  # skip special tokens for RL model
     )
+    inference_params = SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=1)
 
     for step in range(start_step, args.max_rl_resample + 1):
         entropy_thresholds = None if step == 0 or args.dyna_thresh else entropy_thresholds
@@ -108,7 +140,12 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             base_outputs = generate_with_formatted_return(base_model, initial_prompts, init_base_sampling_params)
         else:
             base_outputs = generate_with_formatted_return(base_model, current_prompts, base_sampling_params)
-        base_entropies, base_logprobs, base_generated_tokens, base_responses = base_outputs
+        base_entropies, base_logprobs, base_generated_tokens, base_responses, base_token_logprobs, base_token_ranks = base_outputs
+
+        # inference on the base model outputs to get the token logprobs and ranks
+        infer_prompts = [prompt + gen_tokens for prompt, gen_tokens in zip(current_prompts, base_generated_tokens)]
+        infer_start_idxs = [len(p) for p in current_prompts]
+        rl_token_logprobs, rl_token_ranks = inference_on_prompts(rl_model, infer_prompts, inference_params, infer_start_idxs)
 
         if entropy_thresholds is None:
             percentile = 100 * (1 - args.top_ent)
@@ -151,7 +188,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
     
         # RL model resampling
         rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
-        rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses = rl_outputs
+        rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses, _, _ = rl_outputs
         rl_resample_end_idxs = []
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
             # replace until entropy is lower than threshold or only one token is resampled
@@ -288,7 +325,7 @@ if __name__ == "__main__":
     parser.add_argument("--eot_replace", type=str, default="remove", choices=["keep", "replace", "remove"],
                         help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
-    parser.add_argument("--save_dir", type=str, default="resample_results")
+    parser.add_argument("--save_dir", type=str, default="diff_resample_results")
     parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
