@@ -32,6 +32,22 @@ def get_acc_list(predictions, gt, return_parsed=False):
     acc_list = [verify(gt_parsed, parse(f"${pred}$")) for pred in last_boxs]
     return acc_list if not return_parsed else (acc_list, last_boxs)
 
+def get_acc_forgive_list(predictions, gt, return_parsed=False):
+    gt_parsed = parse(f"${gt}$")
+    all_boxs = [extract_all_boxed(pred) for pred in predictions]
+    acc_list, answers = [], []
+    for boxs in all_boxs:
+        is_correct = False
+        for box in boxs:
+            if verify(gt_parsed, parse(f"${box}$")):
+                is_correct = True
+                acc_list.append(True)
+                answers.append(box)
+                break
+        if not is_correct:
+            acc_list.append(False)
+            answers.append(boxs[-1])
+    return acc_list if not return_parsed else (acc_list, answers)
 
 if __name__ == "__main__":
     # Example usage
@@ -51,3 +67,6 @@ if __name__ == "__main__":
     ]
     acc_list = get_acc_list(predictions, gt)
     print(acc_list)  # Output: [True, True, False]
+
+    acc_list_forgive = get_acc_forgive_list(predictions, gt)
+    print(acc_list_forgive)  # Output: [True, True, True]
