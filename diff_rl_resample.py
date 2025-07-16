@@ -107,7 +107,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         prev_info = continue_info[f'step_{args.continue_from}']
         # extract the final prefixs as the current prompts, and restore the entropy thresholds
         current_prompts = sum([p_info['final_prefixs'] for p_info in prev_info] ,[])
-        entropy_thresholds = sum([p_info['entropy_thresholds'] for p_info in prev_info], [])
+        criteria_thresholds = sum([p_info['criteria_thresholds'] for p_info in prev_info], [])
     else:
         start_step, all_info = 0, {}
         current_prompts = sum([[p]*args.n for p in initial_prompts], [])
@@ -132,74 +132,99 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
     )
     inference_params = SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=1)
 
+    base_model.sleep(level=1)
+    rl_model.sleep(level=1)
     for step in range(start_step, args.max_rl_resample + 1):
-        entropy_thresholds = None if step == 0 or args.dyna_thresh else entropy_thresholds
+        criteria_thresholds = None if step == 0 or args.dyna_thresh else criteria_thresholds
         print(f"\n--- Iteration {step} ---\n")
         # Generate base model outputs
+        base_model.wake_up()
         if step == 0:
             base_outputs = generate_with_formatted_return(base_model, initial_prompts, init_base_sampling_params)
         else:
             base_outputs = generate_with_formatted_return(base_model, current_prompts, base_sampling_params)
         base_entropies, base_logprobs, base_generated_tokens, base_responses, base_token_logprobs, base_token_ranks = base_outputs
+        base_model.sleep(level=1)
 
         # inference on the base model outputs to get the token logprobs and ranks
+        rl_model.wake_up()
         infer_prompts = [prompt + gen_tokens for prompt, gen_tokens in zip(current_prompts, base_generated_tokens)]
         infer_start_idxs = [len(p) for p in current_prompts]
-        rl_token_logprobs, rl_token_ranks = inference_on_prompts(rl_model, infer_prompts, inference_params, infer_start_idxs)
+        rl_infer_token_logprobs, rl_infer_token_ranks = inference_on_prompts(rl_model, infer_prompts, inference_params, infer_start_idxs)
 
-        if entropy_thresholds is None:
+        criteria = [0] * len(current_prompts)
+        for criterion in args.criteria:
+            if criterion == "entropy":
+                # Higher entropy, higher score
+                criteria = [c + np.array(ent)/np.std(ent) for c, ent in zip(criteria, base_entropies)]
+            elif criterion == "logprob":
+                # Higher base logprob, lower RL logprob, higher score
+                logp_diffs = [np.array(base_lp) - np.array(rl_lp) for base_lp, rl_lp in zip(base_token_logprobs, rl_infer_token_logprobs)]
+                criteria = [c + lp_diff/np.std(lp_diff) for c, lp_diff in zip(criteria, logp_diffs)]
+            elif criterion == "rank":
+                # Higher RL rank (low probs), lower base rank (high probs), higher score
+                rank_diffs = [np.array(rl_rank) - np.array(base_rank) for rl_rank, base_rank in zip(rl_infer_token_ranks, base_token_ranks)]
+                criteria = [c + rank_diff/np.std(rank_diff) for c, rank_diff in zip(criteria, rank_diffs)]
+            else:
+                raise ValueError(f"Unsupported criterion: {criterion}. Choose from ['entropy', 'logprob', 'rank'].")
+
+        if criteria_thresholds is None:
             percentile = 100 * (1 - args.top_ent)
             # set entropy threshold on demand
             if args.thresh_level == "response":
-                entropy_thresholds = [np.percentile(ent, percentile) for ent in base_entropies]
+                criteria_thresholds = [np.percentile(cs, percentile) for cs in criteria]
             elif args.thresh_level == "prompt":
-                aggregated_entropies = [np.concatenate(base_entropies[i:i+args.n]) for i in range(0, len(base_entropies), args.n)]
-                entropy_thresholds = [np.percentile(ent, percentile) for ent in aggregated_entropies]
-                entropy_thresholds = sum([[x]*args.n for x in entropy_thresholds], [])  # repeat the threshold for each response
+                aggregated_criteria = [np.concatenate(criteria[i:i+args.n]) for i in range(0, len(criteria), args.n)]
+                criteria_thresholds = [np.percentile(cs, percentile) for cs in aggregated_criteria]
+                criteria_thresholds = sum([[x]*args.n for x in criteria_thresholds], [])  # repeat the threshold for each response
             elif args.thresh_level == "dataset":
-                aggregated_entropies = np.concatenate(base_entropies)
-                entropy_thresholds = [np.percentile(aggregated_entropies, percentile)] * len(base_entropies)  # use the same threshold for all responses
+                aggregated_criteria = np.concatenate(criteria)
+                criteria_thresholds = [np.percentile(aggregated_criteria, percentile)] * len(base_entropies)  # use the same threshold for all responses
             else:
                 raise ValueError(f"Unsupported threshold level: {args.thresh_level}. Choose from ['response', 'prompt', 'dataset'].")
 
         # high-entropy token selection
-        high_entropy_idxs, prefixs_for_rl = [], []
+        all_selected_idxs, prefixs_for_rl = [], []
         for idx, cur_prompt in enumerate(current_prompts):
-            cur_entropies = np.array(base_entropies[idx])
+            cur_criteria = np.array(criteria[idx])
             cur_generated_tokens = base_generated_tokens[idx]
-            threshold = entropy_thresholds[idx]
-            high_entropy_indices = np.where(cur_entropies > threshold)[0]
+            threshold = criteria_thresholds[idx]
+            valid_indices = np.where(cur_criteria > threshold)[0]
             # skip the prefix tokens at the first step
-            if step == 0: high_entropy_indices = high_entropy_indices[high_entropy_indices >= args.num_prefix_keep]
+            if step == 0: valid_indices = valid_indices[valid_indices >= args.num_prefix_keep]
             # if no high-entropy token over the threshold, use the highest entropy token
-            if len(high_entropy_indices) == 0: high_entropy_indices = [np.argmax(cur_entropies)]
-            high_entropy_idx = int(high_entropy_indices[0])  # Take the first high-entropy token index
-            prefix_for_rl = cur_prompt + cur_generated_tokens[:high_entropy_idx]
-            high_entropy_idxs.append(high_entropy_idx)
-            # NOTE: there is no need for the prefix_for_rl (prompt + response[:idx]) to be truncated, 
+            if len(valid_indices) == 0: valid_indices = [np.argmax(cur_criteria)]
+            selected_idx = int(valid_indices[0])  # Take the first high-entropy token index
+            prefix_for_rl = cur_prompt + cur_generated_tokens[:selected_idx]
+            all_selected_idxs.append(selected_idx)
+            # NOTE: there is no need for the prefix_for_rl (prompt + response[:idx]) to be truncated,
             # since we have: len(prompt) + len(response) <= MAX_MODEL_LEN + 1
             # and for idx < len(response), we have len(prompt) + len(response[:idx]) <= MAX_MODEL_LEN
             prefixs_for_rl.append(prefix_for_rl)
             # log
             if idx == 0:
                 print(f"Prefix for RL: {tokenizer.decode(prefix_for_rl)}")
-                print(f"Selected token: [{tokenizer.decode([cur_generated_tokens[high_entropy_idx]])}], " \
-                      f"entropy: {cur_entropies[high_entropy_idx]:.4f}, Threshold: {threshold:.4f}")
-    
+                print(f"Selected token: [{tokenizer.decode([cur_generated_tokens[selected_idx]])}],\n" \
+                      f"entropy: {base_entropies[idx][selected_idx]:.4f}, logprob: {base_token_logprobs[idx][selected_idx]:.4f}, rank: {base_token_ranks[idx][selected_idx]}\n" \
+                      f"RL infer logprob: {rl_infer_token_logprobs[idx][selected_idx]:.4f}, rank: {rl_infer_token_ranks[idx][selected_idx]}\n" \
+                      f"criteria ({args.criteria}): {cur_criteria[selected_idx]:.4f}, Threshold: {threshold:.4f}")
+
         # RL model resampling
         rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
-        rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses, _, _ = rl_outputs
+        rl_model.sleep(level=1)
+        rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses, rl_token_logprobs, rl_token_ranks = rl_outputs
         rl_resample_end_idxs = []
         for idx, cur_rl_prompt in enumerate(prefixs_for_rl):
             # replace until entropy is lower than threshold or only one token is resampled
             end_idx = 1
-            if args.rl_tokens_stop == "hard":
-                while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
-                    end_idx += 1
-            elif args.rl_tokens_stop == "mean":
-                mean_entropies = np.array([np.mean(rl_entropies[idx][:j+1]) for j in range(len(rl_entropies[idx]))])
-                valid_idxs = np.where(mean_entropies >= entropy_thresholds[idx])[0]
-                end_idx = int(valid_idxs[-1]) + 1 if len(valid_idxs) > 0 else 1  # at least replace one token
+            # TODO: Here we only support rl_tokens = 1 and hard stop
+            # if args.rl_tokens_stop == "hard":
+            #     while end_idx < len(rl_entropies[idx]) and rl_entropies[idx][end_idx] >= entropy_thresholds[idx]:
+            #         end_idx += 1
+            # elif args.rl_tokens_stop == "mean":
+            #     mean_entropies = np.array([np.mean(rl_entropies[idx][:j+1]) for j in range(len(rl_entropies[idx]))])
+            #     valid_idxs = np.where(mean_entropies >= entropy_thresholds[idx])[0]
+            #     end_idx = int(valid_idxs[-1]) + 1 if len(valid_idxs) > 0 else 1  # at least replace one token
             replace_tokens = rl_generated_tokens[idx][:end_idx]
             if replace_tokens[-1] == tokenizer.eos_token_id:
                 # Handling eot token, remove is preferred.
@@ -228,7 +253,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 print(f"Warning: The replacement tokens ({tokenizer.decode(replace_tokens)}) contain special tokens.")
             # log
             if idx == 0:
-                print(f"RL resampled: [{rl_responses[idx]}], entropies: {rl_entropies[idx]},"\
+                print(f"RL resampled: [{rl_responses[idx]}], entropies: {rl_entropies[idx]}, logprobs: {rl_token_logprobs[idx]}, rank: {rl_token_ranks[idx]}\n"\
                       f"selected for replace: [{tokenizer.decode(replace_tokens)}] (idx<{end_idx}).")
 
         # record info
@@ -237,20 +262,26 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
             # full responses
-            p_full_responses = [tokenizer.decode(prefixs_for_rl[i] + base_generated_tokens[i][high_entropy_idxs[i]:]) for i in range(start, end)]
+            p_full_responses = [tokenizer.decode(prefixs_for_rl[i] + base_generated_tokens[i][all_selected_idxs[i]:]) for i in range(start, end)]
             p_replace_infos = []  # record each response's replacement info
             for global_idx in range(start, end):
-                replace_idx = high_entropy_idxs[global_idx]
+                replace_idx = all_selected_idxs[global_idx]
                 p_replace_infos.append({
                     "replace_idx": replace_idx,
                     "replace_token": tokenizer.decode([base_generated_tokens[global_idx][replace_idx]]),
                     "replace_entropy": base_entropies[global_idx][replace_idx],
-                    "replace_logprobs": format_vllm_logp(base_logprobs[global_idx][replace_idx], tokenizer),
+                    "replace_logprob": base_token_logprobs[global_idx][replace_idx],
+                    "replace_rank": base_token_ranks[global_idx][replace_idx],
+                    "replace_rl_logprob": rl_infer_token_logprobs[global_idx][replace_idx],
+                    "replace_rl_rank": rl_infer_token_ranks[global_idx][replace_idx],
+                    # "replace_logprobs": format_vllm_logp(base_logprobs[global_idx][replace_idx], tokenizer),
                     "resampled_end_idx": rl_resample_end_idxs[global_idx],
                     "resampled_response": rl_responses[global_idx],
                     "resampled_tokens": rl_generated_tokens[global_idx],
                     "resampled_entropies": rl_entropies[global_idx],
-                    "resampled_logprobs": format_vllm_logp(rl_logprobs[global_idx], tokenizer),
+                    "rl_token_logprobs": rl_token_logprobs[global_idx],
+                    "rl_token_ranks": rl_token_ranks[global_idx],
+                    # "resampled_logprobs": format_vllm_logp(rl_logprobs[global_idx], tokenizer),
                 })
             # calculate the accs
             acc_list, pred_answers = get_acc_list(p_full_responses, gt, True)
@@ -261,15 +292,20 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 "full_responses": p_full_responses,
                 "pred_answers": pred_answers,
                 "accs": acc_list,
-                "entropy_thresholds": entropy_thresholds[start:end],
+                "criteria_thresholds": criteria_thresholds[start:end],
                 "replacements": p_replace_infos,
                 "final_prefixs": current_prompts[start:end] if step == args.max_rl_resample else None,
             })
             avg_accs.append(np.mean(acc_list))
         print(f"** Step {step} Summary **\n")
         print(f"Average accuracy: {np.mean(avg_accs):.4f}")
-        print(f"Average length kept: {np.mean(high_entropy_idxs):.2f}\n")
+        print(f"Average length kept: {np.mean(all_selected_idxs):.2f}\n")
         all_info[f'step_{step}'] = info_list
+
+        if (step + 1) % args.save_freq == 0:
+            with open(args.save_file.replace('.json', f'-temp{step + 1}.json'), 'w') as f:
+                json.dump(all_info, f)
+                print('Temporary results saved.') 
     return all_info
 
 
@@ -310,14 +346,16 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1, help="Random seed for reproducibility")
     parser.add_argument("--num_logprobs", type=int, default=50, help="Number of logprobs to return")
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size for vLLM")
-    parser.add_argument("--base_mem", type=float, default=0.5, help="GPU memory utilization for vLLM")
-    parser.add_argument("--rl_mem", type=float, default=0.3, help="GPU memory utilization for vLLM")
+    parser.add_argument("--base_mem", type=float, default=0.4, help="GPU memory utilization for vLLM")
+    parser.add_argument("--rl_mem", type=float, default=0.4, help="GPU memory utilization for vLLM")
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
     parser.add_argument("--top_ent", type=float, default=0.1, help="Top entropy percentage for selecting high-entropy tokens")
     parser.add_argument("--dyna_thresh", type=int, default=0, help="Whether to use dynamic thresholding for entropy selection")
     parser.add_argument("--thresh_level", type=str, default="prompt", choices=["response", "prompt", "dataset"], help="Level for entropy thresholding")
+    parser.add_argument("--criteria", type=str, default=['entropy'], nargs='+', choices=['entropy', 'logprob', 'rank'],
+                        help="Criteria for selecting high-entropy tokens, can be 'entropy', 'logprob', or 'rank'.")
     parser.add_argument("--rl_tokens", type=int, default=1, help="Number of tokens to resample with RL model at each time")
     parser.add_argument("--rl_tokens_stop", type=str, default="hard", choices=["hard", "mean"], help="RL resampled tokens stopping strategies")
     parser.add_argument("--num_prefix_keep", type=int, default=0, help="Number of prefix tokens to keep in the first step")
@@ -325,16 +363,18 @@ if __name__ == "__main__":
     parser.add_argument("--eot_replace", type=str, default="remove", choices=["keep", "replace", "remove"],
                         help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
-    parser.add_argument("--save_dir", type=str, default="diff_resample_results")
+    parser.add_argument("--save_dir", type=str, default="resample_results_diff")
+    parser.add_argument("--save_freq", type=int, default=10, help="Frequency of saving results during resampling")
     parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
     if not os.path.exists(args.save_dir): os.makedirs(args.save_dir)
     def get_filename(args:argparse.Namespace):
+        criteria_name = "_".join(args.criteria)
         threshold_name = f"{'dyna' if args.dyna_thresh else 'fixed'}_{args.thresh_level}_thresh"
         rl_tokens_name = f"{args.rl_tokens}_rl_tokens-stop_by_{args.rl_tokens_stop}"
         save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}-seed{args.seed}-resample{args.max_rl_resample}"
-        save_name += f"-top_ent{args.top_ent}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
+        save_name += f"-top_{args.top_ent}-{criteria_name}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
         save_name += f"-keep_{args.num_prefix_keep}_prefix-top_p_{args.top_p_base}_{args.top_p_rl}-t_{args.temperature_base}_{args.temperature_rl}-n{args.n}"
         return os.path.join(args.save_dir, f"{save_name}.json")
     args.save_file = get_filename(args)
@@ -355,9 +395,11 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     dataset = load_dataset(args.dataset, split="train")
     base_model = LLM(model=args.base_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True)
+                     gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True,
+                     enable_sleep_mode=True)  # enable_sleep_mode for base model to save memory
     rl_model = LLM(model=args.rl_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
-                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True)
+                   gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True,
+                   max_num_batched_tokens=4096, enable_sleep_mode=True)  # set a smaller max_num_batched_tokens for RL model to avoid OOM
 
     run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer', continue_info=continue_info)
 
