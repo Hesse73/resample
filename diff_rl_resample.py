@@ -132,8 +132,6 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
     )
     inference_params = SamplingParams(max_tokens=1, temperature=0, prompt_logprobs=1)
 
-    base_model.sleep(level=1)
-    rl_model.sleep(level=1)
     for step in range(start_step, args.max_rl_resample + 1):
         criteria_thresholds = None if step == 0 or args.dyna_thresh else criteria_thresholds
         print(f"\n--- Iteration {step} ---\n")
@@ -346,8 +344,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1, help="Random seed for reproducibility")
     parser.add_argument("--num_logprobs", type=int, default=50, help="Number of logprobs to return")
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size for vLLM")
-    parser.add_argument("--base_mem", type=float, default=0.4, help="GPU memory utilization for vLLM")
-    parser.add_argument("--rl_mem", type=float, default=0.4, help="GPU memory utilization for vLLM")
+    parser.add_argument("--base_mem", type=float, default=0.6, help="GPU memory utilization for vLLM")
+    parser.add_argument("--rl_mem", type=float, default=0.6, help="GPU memory utilization for vLLM")
     # RESAMPLING PARAMETERS
     parser.add_argument("--use_chat", type=int, default=0, help="Whether to use chat template (1 for chat, 0 for text prompts)")
     parser.add_argument("--max_rl_resample", type=int, default=30, help="Maximum number of RL resampling iterations")
@@ -364,7 +362,7 @@ if __name__ == "__main__":
                         help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
     parser.add_argument("--save_dir", type=str, default="resample_results_diff")
-    parser.add_argument("--save_freq", type=int, default=10, help="Frequency of saving results during resampling")
+    parser.add_argument("--save_freq", type=int, default=50, help="Frequency of saving results during resampling")
     parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
@@ -397,9 +395,10 @@ if __name__ == "__main__":
     base_model = LLM(model=args.base_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
                      gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True,
                      enable_sleep_mode=True)  # enable_sleep_mode for base model to save memory
+    base_model.sleep(level=1)
     rl_model = LLM(model=args.rl_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
                    gpu_memory_utilization=args.rl_mem, enable_prefix_caching=True, enforce_eager=True,
                    max_num_batched_tokens=4096, enable_sleep_mode=True)  # set a smaller max_num_batched_tokens for RL model to avoid OOM
-
+    rl_model.sleep(level=1)
     run_exp_aime(args, base_model, rl_model, tokenizer, dataset, prompt_key='problem', gt_key='answer', continue_info=continue_info)
 
