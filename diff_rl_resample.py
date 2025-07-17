@@ -17,6 +17,7 @@ from vllm.inputs import TokensPrompt
 from transformers import AutoTokenizer
 from typing import List, Tuple
 from copy import deepcopy
+from scipy.special import logsumexp, softmax
 
 from math_utils import get_acc_list
 
@@ -70,6 +71,57 @@ def generate_with_formatted_return(llm: LLM, prompts: List[str|List[int]], sampl
         return all_entropies, all_logprobs, all_generated_tokens, all_texts, next_token_logprobs, next_token_ranks
     else:
         return outputs
+
+def resample_by_difference(llm: LLM, prompts: List[str|List[int]], sampling_params: SamplingParams, base_next_tokens:List[List[int]], 
+                           base_next_token_logprobs:List[List[float]], resample_beta:float=1.0):
+    assert sampling_params.max_tokens == 1, "Resampling by difference only supports max_tokens=1."
+    assert sampling_params.n == 1, "Resampling by difference only supports n=1."
+    if isinstance(prompts[0], list):
+        prompts = [TokensPrompt(prompt_token_ids=p) for p in prompts]
+    tokenizer = llm.get_tokenizer()
+    outputs = llm.generate(prompts, sampling_params=sampling_params)
+    all_texts = []
+    all_entropies = []
+    all_logprobs = []
+    all_generated_tokens = []
+    next_token_logprobs = []
+    next_token_ranks = []
+    for idx, output in tqdm(enumerate(outputs), desc="processing outputs", total=len(outputs)):
+        out = output.outputs[0]
+        # 1. Get RL token candidates
+        rl_token_ids = [key for key in out.logprobs[0]]
+        rl_token_logprobs = np.array([lp.logprob for lp in out.logprobs[0].values()])
+        # 2. Calculate the difference: RL - base logprobs
+        cur_base_ids, cur_base_logprobs = base_next_tokens[idx], base_next_token_logprobs[idx]
+        pad_lp = min(cur_base_logprobs)
+        base_logprob_aligned = [cur_base_logprobs[cur_base_ids.index(tok)] if tok in cur_base_ids else pad_lp for tok in rl_token_ids]
+        logprob_diff = rl_token_logprobs - np.array(base_logprob_aligned)
+        # 3. Sample the token with the difference augmented rl logprobs
+        logits = rl_token_logprobs + resample_beta * logprob_diff
+        logits_sorted_indices = np.argsort(logits)
+        logits_sorted = logits[logits_sorted_indices]
+        top_p_mask = ~(np.cumsum(softmax(logits_sorted)) <= 1 - sampling_params.top_p)
+        top_p_mask[-1] = True  # Ensure the last token (highest prob) is always included
+        sampled_idx = np.random.choice(logits_sorted_indices[top_p_mask], p=softmax(logits_sorted[top_p_mask]))
+        # selected_idx = np.random.choice(len(rl_token_ids), p=probs_for_resample)
+        resampled_token, resampled_logprob = rl_token_ids[sampled_idx], rl_token_logprobs[sampled_idx]
+        response = tokenizer.decode([resampled_token], skip_special_tokens=True)
+        # 4. calculate entropy
+        rl_logprobs_norm = rl_token_logprobs - logsumexp(rl_token_logprobs)
+        entropy = -np.sum(rl_logprobs_norm * np.exp(rl_logprobs_norm))
+        # 5. Store the results
+        all_texts.append(response)
+        all_entropies.append([entropy])
+        all_logprobs.append(out.logprobs)
+        all_generated_tokens.append([resampled_token])
+        next_token_logprobs.append([resampled_logprob])
+        next_token_ranks.append([out.logprobs[0][resampled_token].rank])
+        # log
+        if idx == 0:
+            print(f"Base tokens: {cur_base_ids[:10]}, logprobs: {cur_base_logprobs[:10]}")
+            print(f"RL tokens: {rl_token_ids[:10]}, logprobs: {rl_token_logprobs[:10]}")
+            print(f"Resampled token id: {resampled_token} ({response}), logprob: {resampled_logprob:.4f}, difference: {logprob_diff[sampled_idx]:.4f}")
+    return all_entropies, all_logprobs, all_generated_tokens, all_texts, next_token_logprobs, next_token_ranks
 
 def inference_on_prompts(llm: LLM, prompts: List[str|List[int]], sampling_params: SamplingParams,
                          start_idxs:List[int]):
@@ -152,17 +204,18 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
 
         criteria = [0] * len(current_prompts)
         for criterion in args.criteria:
+            normalize = True if len(args.criteria) > 1 else False
             if criterion == "entropy":
                 # Higher entropy, higher score
-                criteria = [c + np.array(ent)/np.std(ent) for c, ent in zip(criteria, base_entropies)]
+                criteria = [c + np.array(ent)/np.std(ent) if normalize else ent for c, ent in zip(criteria, base_entropies)]
             elif criterion == "logprob":
                 # Higher base logprob, lower RL logprob, higher score
                 logp_diffs = [np.array(base_lp) - np.array(rl_lp) for base_lp, rl_lp in zip(base_token_logprobs, rl_infer_token_logprobs)]
-                criteria = [c + lp_diff/np.std(lp_diff) for c, lp_diff in zip(criteria, logp_diffs)]
+                criteria = [c + lp_diff/np.std(lp_diff) if normalize else lp_diff for c, lp_diff in zip(criteria, logp_diffs)]
             elif criterion == "rank":
                 # Higher RL rank (low probs), lower base rank (high probs), higher score
                 rank_diffs = [np.array(rl_rank) - np.array(base_rank) for rl_rank, base_rank in zip(rl_infer_token_ranks, base_token_ranks)]
-                criteria = [c + rank_diff/np.std(rank_diff) for c, rank_diff in zip(criteria, rank_diffs)]
+                criteria = [c + rank_diff/np.std(rank_diff) if normalize else rank_diff for c, rank_diff in zip(criteria, rank_diffs)]
             else:
                 raise ValueError(f"Unsupported criterion: {criterion}. Choose from ['entropy', 'logprob', 'rank'].")
 
@@ -208,7 +261,15 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                       f"criteria ({args.criteria}): {cur_criteria[selected_idx]:.4f}, Threshold: {threshold:.4f}")
 
         # RL model resampling
-        rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
+        if args.diff_resample_beta > 0:
+            base_resample_tokens, base_resample_token_logprobs = [], []
+            for selected_idx, lp_infos in zip(all_selected_idxs, base_logprobs):
+                base_resample_tokens.append(list(lp_infos[selected_idx].keys()))
+                base_resample_token_logprobs.append([lp.logprob for lp in lp_infos[selected_idx].values()])
+            rl_outputs = resample_by_difference(rl_model, prefixs_for_rl, rl_sampling_params, base_resample_tokens, 
+                                                base_resample_token_logprobs, resample_beta=args.diff_resample_beta)
+        else:
+            rl_outputs = generate_with_formatted_return(rl_model, prefixs_for_rl, rl_sampling_params)
         rl_model.sleep(level=1)
         rl_entropies, rl_logprobs, rl_generated_tokens, rl_responses, rl_token_logprobs, rl_token_ranks = rl_outputs
         rl_resample_end_idxs = []
@@ -356,6 +417,7 @@ if __name__ == "__main__":
                         help="Criteria for selecting high-entropy tokens, can be 'entropy', 'logprob', or 'rank'.")
     parser.add_argument("--rl_tokens", type=int, default=1, help="Number of tokens to resample with RL model at each time")
     parser.add_argument("--rl_tokens_stop", type=str, default="hard", choices=["hard", "mean"], help="RL resampled tokens stopping strategies")
+    parser.add_argument("--diff_resample_beta", type=float, default=0, help="Beta for resampling by difference, 0 for no difference resampling")
     parser.add_argument("--num_prefix_keep", type=int, default=0, help="Number of prefix tokens to keep in the first step")
     parser.add_argument("--include_prefix", type=int, default=1, help="Whether to include RL prefix pattern in the beginning") 
     parser.add_argument("--eot_replace", type=str, default="remove", choices=["keep", "replace", "remove"],
@@ -371,6 +433,7 @@ if __name__ == "__main__":
         criteria_name = "_".join(args.criteria)
         threshold_name = f"{'dyna' if args.dyna_thresh else 'fixed'}_{args.thresh_level}_thresh"
         rl_tokens_name = f"{args.rl_tokens}_rl_tokens-stop_by_{args.rl_tokens_stop}"
+        rl_tokens_name += (f"-diff_resample_{args.diff_resample_beta}" if args.diff_resample_beta > 0 else "")
         save_name = f"{args.base_model.split('/')[-1]}-{args.rl_model.split('/')[-1]}-{args.dataset.split('/')[-1]}-seed{args.seed}-resample{args.max_rl_resample}"
         save_name += f"-top_{args.top_ent}-{criteria_name}-{threshold_name}-{rl_tokens_name}-{args.eot_replace}_eot-use_chat{args.use_chat}-include_prefix{args.include_prefix}"
         save_name += f"-keep_{args.num_prefix_keep}_prefix-top_p_{args.top_p_base}_{args.top_p_rl}-t_{args.temperature_base}_{args.temperature_rl}-n{args.n}"
