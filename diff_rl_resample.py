@@ -150,6 +150,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                           continue_info=None):
     # flatten the prompts and repeat each n times
     initial_prompts = [tokenizer.encode(p, add_special_tokens=False) for p in prompts]
+    initial_prompts_len = [len(p) for p in initial_prompts]
     MAX_MODEL_LEN = base_model.llm_engine.model_config.max_model_len
     
     if continue_info is not None and args.continue_from > 0:
@@ -200,6 +201,15 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
         rl_model.wake_up()
         infer_prompts = [prompt + gen_tokens for prompt, gen_tokens in zip(current_prompts, base_generated_tokens)]
         infer_start_idxs = [len(p) for p in current_prompts]
+        # truncate the infer prompts if they are too long
+        for idx, infer_p in enumerate(infer_prompts):
+            if len(infer_p) > MAX_MODEL_LEN:
+                assert len(current_prompts[idx]) == MAX_MODEL_LEN and len(base_generated_tokens[idx]) == 1, \
+                    f"Unknown reason of the prompt {infer_p} being longer than {MAX_MODEL_LEN}."
+                # the infer prompt could be longer than MAX_MODEL_LEN if the base model's prompt is already at max length
+                # although it can still generate a single token, we need to truncate the prompt to get infer prompt fit the model
+                infer_prompts[idx] = infer_p[1:]
+                print(f"Warning: Truncating infer prompt to fit model max length ({len(infer_prompts[idx])} > {MAX_MODEL_LEN}).")
         rl_infer_token_logprobs, rl_infer_token_ranks = inference_on_prompts(rl_model, infer_prompts, inference_params, infer_start_idxs)
 
         criteria = [0] * len(current_prompts)
@@ -321,7 +331,10 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
             start, end = idx * args.n, (idx + 1) * args.n
             p_responses = base_responses[start:end]  # all responses for this prompt
             # full responses
-            p_full_responses = [tokenizer.decode(prefixs_for_rl[i] + base_generated_tokens[i][all_selected_idxs[i]:]) for i in range(start, end)]
+            p_full_responses = [prefixs_for_rl[i] + base_generated_tokens[i][all_selected_idxs[i]:] for i in range(start, end)]
+            p_full_responses_len = [len(resp) - initial_prompts_len[idx] for resp in p_full_responses]
+            p_full_responses = [tokenizer.decode(resp) for resp in p_full_responses]  # decode the full responses
+            # p_full_responses = [tokenizer.decode(prefixs_for_rl[i] + base_generated_tokens[i][all_selected_idxs[i]:]) for i in range(start, end)]
             p_replace_infos = []  # record each response's replacement info
             for global_idx in range(start, end):
                 replace_idx = all_selected_idxs[global_idx]
@@ -349,6 +362,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 "ground_truth": gt,
                 "responses": p_responses,
                 "full_responses": p_full_responses,
+                "full_responses_len": p_full_responses_len,
                 "pred_answers": pred_answers,
                 "accs": acc_list,
                 "criteria_thresholds": criteria_thresholds[start:end],
@@ -424,7 +438,7 @@ if __name__ == "__main__":
                         help="How to handle <|endoftext|> token in RL resampling: 'keep' to keep it, 'replace' to replace with another top-prob token, 'remove' to remove it")
     # OTHERS
     parser.add_argument("--save_dir", type=str, default="resample_results_diff")
-    parser.add_argument("--save_freq", type=int, default=50, help="Frequency of saving results during resampling")
+    parser.add_argument("--save_freq", type=int, default=1e8, help="Frequency of saving results during resampling (default not saving)")
     parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
