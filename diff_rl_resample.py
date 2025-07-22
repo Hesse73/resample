@@ -209,6 +209,7 @@ def iterative_rl_resample(args, base_model: LLM, rl_model: LLM, tokenizer: AutoT
                 # the infer prompt could be longer than MAX_MODEL_LEN if the base model's prompt is already at max length
                 # although it can still generate a single token, we need to truncate the prompt to get infer prompt fit the model
                 infer_prompts[idx] = infer_p[1:]
+                infer_start_idxs[idx] -= 1  # adjust the start index accordingly
                 print(f"Warning: Truncating infer prompt to fit model max length ({len(infer_prompts[idx])} > {MAX_MODEL_LEN}).")
         rl_infer_token_logprobs, rl_infer_token_ranks = inference_on_prompts(rl_model, infer_prompts, inference_params, infer_start_idxs)
 
