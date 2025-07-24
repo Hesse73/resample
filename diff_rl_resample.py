@@ -441,6 +441,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_dir", type=str, default="resample_results_diff")
     parser.add_argument("--save_freq", type=int, default=1e8, help="Frequency of saving results during resampling (default not saving)")
     parser.add_argument("--continue_from", type=int, default=0, help="Continue from a specific step (0 for fresh run)")
+    parser.add_argument("--use_rl_tokenizer", type=int, default=0, help="Use RL model tokenizer for encoding prompts (1 for RL tokenizer, 0 for base tokenizer)")
     args = parser.parse_args()
     print(f"Arguments: {args}")
     if not os.path.exists(args.save_dir): os.makedirs(args.save_dir)
@@ -468,7 +469,10 @@ if __name__ == "__main__":
         with open(load_from_file, 'r') as f:
             continue_info = json.load(f)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    if args.use_rl_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(args.rl_model)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     dataset = load_dataset(args.dataset, split="train")
     base_model = LLM(model=args.base_model, tensor_parallel_size=args.tp_size, max_logprobs=args.num_logprobs,
                      gpu_memory_utilization=args.base_mem, enable_prefix_caching=True, enforce_eager=True,
