@@ -16,13 +16,13 @@ from typing import List, Tuple
 from scipy.special import softmax, logsumexp
 
 
-def weighted_sampling(outputs, outputs_assistant, disable_mask:List[bool], sampling_params:SamplingParams, weights:Tuple[float, float]=(1.05, -0.05)):
+def weighted_sampling(outputs, outputs_assistant, enable_mask:List[bool], sampling_params:SamplingParams, weights:Tuple[float, float]=(1.05, -0.05)):
     """
     Perform weighted sampling based on the logprobs from two models.
     """
     sampled_next_tokens = []
-    for output, output_assistant, disable in zip(outputs, outputs_assistant, disable_mask):
-        if disable:
+    for output, output_assistant, enable in zip(outputs, outputs_assistant, enable_mask):
+        if not enable:
             # If the weighted sampling is disabled, we just use the main model's output
             sampled_next_tokens.append(output.outputs[0].token_ids[0]); continue
         # 0-idx means the first (and only) response and token respectively
@@ -46,10 +46,42 @@ def weighted_sampling(outputs, outputs_assistant, disable_mask:List[bool], sampl
         sampled_next_tokens.append(token_ids[sampled_idx])
     return sampled_next_tokens
 
+def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:float=1.0):
+    """
+    Get a mask indicating whether to use the assistant's logprobs based on the criteria.
+    """
+    enable_mask = []
+    for output, output_assistant in zip(outputs, outputs_assistant):
+        out, out_assistant = output.outputs[0], output_assistant.outputs[0]
+        lp_info, lp_info_assistant = out.logprobs[0], out_assistant.logprobs[0]
+        if criteria == "entropy":
+            # Calculate entropy for the main model's logprobs
+            logprobs = np.array([lp.logprob for lp in lp_info.values()])
+            logps_norm = logprobs - logsumexp(logprobs)
+            entropy = -np.sum(np.exp(logps_norm) * logps_norm)
+            enable_mask.append(entropy >= threshold)
+        elif criteria in ["logp", "neg_logp"]:
+            # Calculate logp diff between the main model and the assistant
+            next_token = out.token_ids[0]
+            logp_main = lp_info[next_token].logprob
+            logp_assistant = lp_info_assistant[next_token].logprob if next_token in lp_info_assistant \
+                             else min([lp.logprob for lp in lp_info_assistant.values()])
+            logp_diff = logp_main - logp_assistant
+            enabled = logp_diff <= threshold if criteria == "logp" else logp_diff >= threshold
+            enable_mask.append(enabled)
+        elif criteria == "none":
+            enable_mask.append(False)
+        elif criteria == "all":
+            enable_mask.append(True)
+        else:
+            raise ValueError(f"Unknown criteria: {criteria}")
+    return enable_mask
+
 def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, prompts:List[str], gts:List[str]):
     tokenizer = llm.get_tokenizer()
     initial_prompts = sum([[tokenizer.encode(p, add_special_tokens=False) for p in prompts]] * args.n, [])
     all_generated_texts = {i:[] for i in range(len(initial_prompts))}
+    all_weighted_generated = {i:[] for i in range(len(initial_prompts))}
     print(f"Total prompts: {len(initial_prompts)}\nExample:\n{tokenizer.decode(initial_prompts[0])}")
 
     sp = SamplingParams(
@@ -75,12 +107,18 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
         outputs = llm.generate(inputs, sampling_params=sp, use_tqdm=False)
         outputs_assistant = llm_assistant.generate(inputs, sampling_params=sp, use_tqdm=False)
         # reweighting
-        # sampled_next_tokens = [out.outputs[0].token_ids[0] for out in outputs]
-        sampled_next_tokens = weighted_sampling(outputs, outputs_assistant, [False] * len(cur_prompts), sp, weights=args.weights)
+        # We use some criteria to decide whether to use the assistant's logprobs
+        # 1. entropy: if the entropy is higher than a threshold (e.g., 0.8)
+        # 2. logp diff: if the logp diff is lower than a threshold (e.g., -0.2)
+        # 3. neg_logp diff: if the negative logp diff is higher than a threshold (e.g., 0.2)
+        # 4. none/all: no or all enabled
+        enable_mask = get_enable_mask(outputs, outputs_assistant, criteria=args.criteria, threshold=args.threshold)
+        sampled_next_tokens = weighted_sampling(outputs, outputs_assistant, enable_mask, sp, weights=args.weights)
         # update responses, prompts, and lengths
         finished_idxs = []
         for i, next_token in enumerate(sampled_next_tokens):
-            all_generated_texts[cur_idxs[i]].append(next_token)
+            all_generated_texts[cur_idxs[i]].append(next_token) # append next token
+            all_weighted_generated[cur_idxs[i]].append(enable_mask[i]) # append whether the assistant's logprobs were used
             cur_prompts[i] += [next_token]
             cur_lengths[i] += 1
             if next_token == tokenizer.eos_token_id or cur_lengths[i] >= args.max_tokens:
@@ -96,23 +134,28 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
             cur_idxs.append(max_idx)
             cur_lengths.append(0)
             max_idx += 1
-        pbar.set_postfix_str(f"{2*len(cur_prompts)/(time.time()-start):.1f} tok/s") # 2* for two models
+        pbar.set_postfix_str(f"{len(cur_prompts)/(time.time()-start):.1f} tok/s (resampled {np.mean(enable_mask):.0%})")
     pbar.close()
 
-    all_info, avg_accs = [], []
+    all_info, avg_accs, avg_resampled = [], [], []
     for idx, gt in enumerate(gts):
         # we get all the generated texts for the each prompt (which is repeated n times)
         cur_generated_texts = [all_generated_texts[i*len(prompts)+idx] for i in range(args.n)]
         cur_generated_texts = [tokenizer.decode(t, skip_special_tokens=False) for t in cur_generated_texts]
+        cur_resample_rates = [np.mean(all_weighted_generated[i*len(prompts)+idx]) for i in range(args.n)]
+        # cur_weighted_generated_idxs = [np.where(np.array(t) == True)[0].tolist() for t in cur_weighted_generated]
         accs = get_acc_list(cur_generated_texts, gt)
         all_info.append({
             'prompt': prompts[idx],
             'gt': gt,
             'generated_texts': cur_generated_texts,
             'accs': accs,
+            'resample_rates': cur_resample_rates
         })
         avg_accs.append(np.mean(accs))
+        avg_resampled.append(np.mean(cur_resample_rates))
     print(f"Average accuracy: {np.mean(avg_accs):.4f} ± {np.std(avg_accs):.4f}")
+    print(f"Average resampling rate: {np.mean(avg_resampled):.4f} ± {np.std(avg_resampled):.4f}")
     return all_info
 
 
@@ -134,7 +177,10 @@ if __name__ == "__main__":
     # weights for the two models
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 0.0), 
                         help="Weights for the two models' logprobs, e.g., 1.05 -0.05")
-    # others
+    # whether to enable the assistant's logprobs
+    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all"])
+    parser.add_argument("--threshold", type=float, default=1.0, help="Threshold for the criteria")
+    # other args
     parser.add_argument("--save_dir", type=str, default="results", help="Directory to save results")
     args = parser.parse_args()
     np.random.seed(args.seed)
@@ -144,7 +190,7 @@ if __name__ == "__main__":
         print(f"Warning: weights {args.weights} do not sum to 1.0, normalizing them.")
         args.weights = [w / sum(args.weights) for w in args.weights]
     save_path = f"{os.path.basename(args.model)}-{os.path.basename(args.assistant)}-{os.path.basename(args.dataset)}"
-    save_path += f"-w{args.weights[0]}_{args.weights[1]}"
+    save_path += f"-w{args.weights[0]}_{args.weights[1]}-select_{args.criteria}-thresh_{args.threshold}"
     save_path += f"-n{args.n}-t{args.temperature}-top_p{args.top_p}-seed{args.seed}.json"
     print(f"Results will be saved to {os.path.join(args.save_dir, save_path)}")
     
