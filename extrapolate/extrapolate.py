@@ -16,12 +16,15 @@ from typing import List, Tuple
 from scipy.special import softmax, logsumexp
 
 
-def weighted_sampling(outputs, outputs_assistant, weights:Tuple[float, float]=(1.05, -0.05), sampling_params:SamplingParams=None):
+def weighted_sampling(outputs, outputs_assistant, disable_mask:List[bool], sampling_params:SamplingParams, weights:Tuple[float, float]=(1.05, -0.05)):
     """
     Perform weighted sampling based on the logprobs from two models.
     """
     sampled_next_tokens = []
-    for output, output_assistant in zip(outputs, outputs_assistant):
+    for output, output_assistant, disable in zip(outputs, outputs_assistant, disable_mask):
+        if disable:
+            # If the weighted sampling is disabled, we just use the main model's output
+            sampled_next_tokens.append(output.outputs[0].token_ids[0]); continue
         # 0-idx means the first (and only) response and token respectively
         out, out_assistant = output.outputs[0], output_assistant.outputs[0]
         lp_info, lp_info_assistant = out.logprobs[0], out_assistant.logprobs[0]
@@ -73,7 +76,7 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
         outputs_assistant = llm_assistant.generate(inputs, sampling_params=sp, use_tqdm=False)
         # reweighting
         # sampled_next_tokens = [out.outputs[0].token_ids[0] for out in outputs]
-        sampled_next_tokens = weighted_sampling(outputs, outputs_assistant, weights=args.weights, sampling_params=sp)
+        sampled_next_tokens = weighted_sampling(outputs, outputs_assistant, [False] * len(cur_prompts), sp, weights=args.weights)
         # update responses, prompts, and lengths
         finished_idxs = []
         for i, next_token in enumerate(sampled_next_tokens):
