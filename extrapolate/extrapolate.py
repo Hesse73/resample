@@ -127,7 +127,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=20_000, help="Maximum tokens to generate")
     parser.add_argument("--gpu_util", type=float, default=0.4, help="GPU utilization for the model")
     parser.add_argument("--tp_size", type=int, default=8, help="Tensor parallel size")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     # weights for the two models
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 0.0), 
                         help="Weights for the two models' logprobs, e.g., 1.05 -0.05")
