@@ -74,7 +74,7 @@ def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:f
             logp_assistant = lp_info_assistant[next_token].logprob if next_token in lp_info_assistant \
                              else min([lp.logprob for lp in lp_info_assistant.values()])
             logp_diff = logp_main - logp_assistant
-            enabled = logp_diff <= threshold if criteria == "logp" else logp_diff >= threshold
+            enabled = logp_diff <= threshold if criteria == "logp" else -logp_diff <= threshold
             enable_mask.append(enabled)
         elif criteria == "none":
             enable_mask.append(False)
