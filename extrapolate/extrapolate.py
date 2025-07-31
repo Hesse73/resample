@@ -20,31 +20,38 @@ def weighted_sampling(outputs, outputs_assistant, enable_mask:List[bool], sampli
     """
     Perform weighted sampling based on the logprobs from two models.
     """
-    sampled_next_tokens = []
+    sampled_next_tokens, resample_infos = [], []
     for output, output_assistant, enable in zip(outputs, outputs_assistant, enable_mask):
         if not enable:
             # If the weighted sampling is disabled, we just use the main model's output
-            sampled_next_tokens.append(output.outputs[0].token_ids[0]); continue
-        # 0-idx means the first (and only) response and token respectively
-        out, out_assistant = output.outputs[0], output_assistant.outputs[0]
-        lp_info, lp_info_assistant = out.logprobs[0], out_assistant.logprobs[0]
-        token_ids, logprobs = [key for key in lp_info], np.array([lp.logprob for lp in lp_info.values()])
-        logp_map_assistant = {key: lp.logprob for key, lp in lp_info_assistant.items()}
-        # 1. align the assistant's logprobs with the main model's token_ids
-        pad_lp = min(logp_map_assistant.values())
-        aligned_logprobs_assistant = np.array([logp_map_assistant[tid] if tid in logp_map_assistant \
-                                               else pad_lp for tid in token_ids])
-        # 2. reweight the logprobs & apply temperature
-        logits = logprobs * weights[0] + aligned_logprobs_assistant * weights[1]
-        logits /= sampling_params.temperature 
-        # 3. top-p sampling
-        logits_sorted_indices = np.argsort(logits)
-        logits_sorted = logits[logits_sorted_indices]
-        top_p_mask = ~(np.cumsum(softmax(logits_sorted)) <= 1 - sampling_params.top_p)
-        top_p_mask[-1] = True  # Ensure the last token (highest prob) is always included
-        sampled_idx = np.random.choice(logits_sorted_indices[top_p_mask], p=softmax(logits_sorted[top_p_mask]))
-        sampled_next_tokens.append(token_ids[sampled_idx])
-    return sampled_next_tokens
+            sampled_next_tokens.append(output.outputs[0].token_ids[0])
+            resample_infos.append(None)
+        else:
+            # 0-idx means the first (and only) response and token respectively
+            out, out_assistant = output.outputs[0], output_assistant.outputs[0]
+            lp_info, lp_info_assistant = out.logprobs[0], out_assistant.logprobs[0]
+            token_ids, logprobs = [key for key in lp_info], np.array([lp.logprob for lp in lp_info.values()])
+            logp_map_assistant = {key: lp.logprob for key, lp in lp_info_assistant.items()}
+            # 1. align the assistant's logprobs with the main model's token_ids
+            pad_lp = min(logp_map_assistant.values())
+            aligned_logprobs_assistant = np.array([logp_map_assistant[tid] if tid in logp_map_assistant \
+                                                else pad_lp for tid in token_ids])
+            # 2. reweight the logprobs & apply temperature
+            logits = logprobs * weights[0] + aligned_logprobs_assistant * weights[1]
+            logits /= sampling_params.temperature 
+            # 3. top-p sampling
+            logits_sorted_indices = np.argsort(logits)
+            logits_sorted = logits[logits_sorted_indices]
+            top_p_mask = ~(np.cumsum(softmax(logits_sorted)) <= 1 - sampling_params.top_p)
+            top_p_mask[-1] = True  # Ensure the last token (highest prob) is always included
+            sampled_idx = np.random.choice(logits_sorted_indices[top_p_mask], p=softmax(logits_sorted[top_p_mask]))
+            sampled_next_tokens.append(token_ids[sampled_idx])
+            resample_infos.append({
+                'original': out.token_ids[0],
+                'assistant': out_assistant.token_ids[0],
+                'resampled': token_ids[sampled_idx]
+            })
+    return sampled_next_tokens, resample_infos
 
 def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:float=1.0):
     """
@@ -81,7 +88,8 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
     tokenizer = llm.get_tokenizer()
     initial_prompts = sum([[tokenizer.encode(p, add_special_tokens=False) for p in prompts]] * args.n, [])
     all_generated_texts = {i:[] for i in range(len(initial_prompts))}
-    all_weighted_generated = {i:[] for i in range(len(initial_prompts))}
+    all_resampled_masks = {i:[] for i in range(len(initial_prompts))}
+    all_resample_infos = {i:{} for i in range(len(initial_prompts))} # idx -> info dict
     print(f"Total prompts: {len(initial_prompts)}\nExample:\n{tokenizer.decode(initial_prompts[0])}")
 
     sp = SamplingParams(
@@ -113,12 +121,13 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
         # 3. neg_logp diff: if the negative logp diff is higher than a threshold (e.g., 0.2)
         # 4. none/all: no or all enabled
         enable_mask = get_enable_mask(outputs, outputs_assistant, criteria=args.criteria, threshold=args.threshold)
-        sampled_next_tokens = weighted_sampling(outputs, outputs_assistant, enable_mask, sp, weights=args.weights)
+        sampled_next_tokens, resample_infos = weighted_sampling(outputs, outputs_assistant, enable_mask, sp, weights=args.weights)
         # update responses, prompts, and lengths
         finished_idxs = []
         for i, next_token in enumerate(sampled_next_tokens):
             all_generated_texts[cur_idxs[i]].append(next_token) # append next token
-            all_weighted_generated[cur_idxs[i]].append(enable_mask[i]) # append whether the assistant's logprobs were used
+            all_resampled_masks[cur_idxs[i]].append(enable_mask[i]) # append whether the assistant's logprobs were used
+            if resample_infos[i]: all_resample_infos[cur_idxs[i]][cur_lengths[i]] = resample_infos[i]  # store resample info
             cur_prompts[i] += [next_token]
             cur_lengths[i] += 1
             if next_token == tokenizer.eos_token_id or cur_lengths[i] >= args.max_tokens:
@@ -142,7 +151,9 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
         # we get all the generated texts for the each prompt (which is repeated n times)
         cur_generated_texts = [all_generated_texts[i*len(prompts)+idx] for i in range(args.n)]
         cur_generated_texts = [tokenizer.decode(t, skip_special_tokens=False) for t in cur_generated_texts]
-        cur_resample_rates = [np.mean(all_weighted_generated[i*len(prompts)+idx]) for i in range(args.n)]
+        cur_resample_rates = [np.mean(all_resampled_masks[i*len(prompts)+idx]) for i in range(args.n)]
+        cur_text_lengths = [len(all_resampled_masks[i*len(prompts)+idx]) for i in range(args.n)] # the length is equal to mask size
+        cur_resample_infos = [all_resample_infos[i*len(prompts)+idx] for i in range(args.n)]
         # cur_weighted_generated_idxs = [np.where(np.array(t) == True)[0].tolist() for t in cur_weighted_generated]
         accs = get_acc_list(cur_generated_texts, gt)
         all_info.append({
@@ -150,7 +161,9 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
             'gt': gt,
             'generated_texts': cur_generated_texts,
             'accs': accs,
-            'resample_rates': cur_resample_rates
+            'lengths': cur_text_lengths,
+            'resample_rates': cur_resample_rates,
+            'resample_infos': cur_resample_infos,
         })
         avg_accs.append(np.mean(accs))
         avg_resampled.append(np.mean(cur_resample_rates))
@@ -191,7 +204,9 @@ if __name__ == "__main__":
         args.weights = [w / sum(args.weights) for w in args.weights]
     save_path = f"{os.path.basename(args.model)}-{os.path.basename(args.assistant)}-{os.path.basename(args.dataset)}"
     save_path += f"-w{args.weights[0]}_{args.weights[1]}-select_{args.criteria}-thresh_{args.threshold}"
-    save_path += f"-n{args.n}-t{args.temperature}-top_p{args.top_p}-seed{args.seed}.json"
+    save_path += f"-n{args.n}-t{args.temperature}-top_p{args.top_p}"
+    os.makedirs(os.path.join(args.save_dir, save_path), exist_ok=True)
+    save_path = os.path.join(save_path, f"seed{args.seed}.json")
     print(f"Results will be saved to {os.path.join(args.save_dir, save_path)}")
     
     # Load dataset
