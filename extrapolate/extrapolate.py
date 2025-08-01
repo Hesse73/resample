@@ -76,6 +76,23 @@ def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:f
             logp_diff = logp_main - logp_assistant
             enabled = logp_diff <= threshold if criteria == "logp" else -logp_diff <= threshold
             enable_mask.append(enabled)
+        elif criteria == "js":
+            # JS divergence
+            def kl_divergence(lp_info, lp_info_assistant):
+                token_ids, logprobs = [key for key in lp_info], np.array([lp.logprob for lp in lp_info.values()])
+                logp_map_assistant = {key: lp.logprob for key, lp in lp_info_assistant.items()}
+                pad_lp = min(logp_map_assistant.values())
+                aligned_logprobs_assistant = np.array([logp_map_assistant[tid] if tid in logp_map_assistant \
+                                                       else pad_lp for tid in token_ids])
+                logprobs_norm = logprobs - logsumexp(logprobs)
+                aligned_logprobs_assistant_norm = aligned_logprobs_assistant - logsumexp(aligned_logprobs_assistant)
+                # KL divergence
+                kl = np.sum(np.exp(logprobs_norm) * (logprobs_norm - aligned_logprobs_assistant_norm))
+                return kl
+            kl_main = kl_divergence(lp_info, lp_info_assistant)
+            kl_assistant = kl_divergence(lp_info_assistant, lp_info)
+            js_divergence = 0.5 * (kl_main + kl_assistant)
+            enable_mask.append(js_divergence >= threshold)
         elif criteria == "none":
             enable_mask.append(False)
         elif criteria == "all":
@@ -180,6 +197,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="../hf_models/DAPO-Qwen-32B", help="Path to the first model")
     parser.add_argument("--assistant", type=str, default="../hf_models/Qwen2.5-32B", help="Path to the second model")
     parser.add_argument("--dataset", type=str, default="../hf_datasets/aime24", help="Path to the dataset")
+    parser.add_argument("--tokenizer", type=str, default="model", choices=["model", "assistant"],
+                        help="Which tokenizer to use for encoding the prompts")
     # sampling params
     parser.add_argument("--n", type=int, default=32, help="#responses per prompt")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for sampling")
@@ -193,7 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 0.0), 
                         help="Weights for the two models' logprobs, e.g., 1.05 -0.05")
     # whether to enable the assistant's logprobs
-    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all", "rand"])
+    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all", "rand", "js"])
     parser.add_argument("--threshold", type=float, default=1.0, help="Threshold for the criteria")
     # other args
     parser.add_argument("--save_dir", type=str, default="results", help="Directory to save results")
@@ -222,7 +241,7 @@ if __name__ == "__main__":
               enforce_eager=True, tensor_parallel_size=args.tp_size, max_logprobs=args.logprobs)
 
     # process the prompts
-    tokenizer = llm.get_tokenizer()
+    tokenizer = llm.get_tokenizer() if args.tokenizer == "model" else assistant.get_tokenizer()
     suffix = "\nPlease reason step by step, and put your final answer within \\boxed{}."
     prompts = [tokenizer.apply_chat_template([{'role': 'user', 'content': q.strip() + suffix}], tokenize=False, 
                                              add_generation_prompt=True) for q in prompts]
