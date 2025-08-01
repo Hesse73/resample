@@ -80,6 +80,8 @@ def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:f
             enable_mask.append(False)
         elif criteria == "all":
             enable_mask.append(True)
+        elif criteria == "rand":
+            enable_mask.append(np.random.rand() < threshold)
         else:
             raise ValueError(f"Unknown criteria: {criteria}")
     return enable_mask
@@ -191,7 +193,7 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 0.0), 
                         help="Weights for the two models' logprobs, e.g., 1.05 -0.05")
     # whether to enable the assistant's logprobs
-    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all"])
+    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all", "rand"])
     parser.add_argument("--threshold", type=float, default=1.0, help="Threshold for the criteria")
     # other args
     parser.add_argument("--save_dir", type=str, default="results", help="Directory to save results")
