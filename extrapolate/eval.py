@@ -25,6 +25,14 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
 
     args = parser.parse_args()
+    save_path = f'_test_results/{args.model.split("/")[-1]}_results.json'
+    if os.path.exists(save_path):
+        print(f"Results already exist at {save_path}. Skipping evaluation.")
+        # load existing results
+        infos = json.load(open(save_path, 'r'))
+        avg_acc = np.mean([info['accs'] for info in infos])
+        print(f"Average accuracy from existing results: {avg_acc:.2f}")
+        sys.exit(0)
 
     # Load dataset
     ds = datasets.load_dataset(args.dataset, split='train')
@@ -69,4 +77,4 @@ if __name__ == "__main__":
     print(f"Average accuracy: {avg_acc:.2f}")
     
     # Save results
-    json.dump(infos, open(f'_test_results/{args.model.split("/")[-1]}_results.json', 'w'), indent=4)
+    json.dump(infos, open(save_path, 'w'), indent=4)

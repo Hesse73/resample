@@ -162,7 +162,7 @@ def decode_with_two_models(args:argparse.Namespace, llm:LLM, llm_assistant:LLM, 
             cur_idxs.append(max_idx)
             cur_lengths.append(0)
             max_idx += 1
-        pbar.set_postfix_str(f"{len(cur_prompts)/(time.time()-start):.1f} tok/s (resampled {np.mean(enable_mask):.0%})")
+        pbar.set_postfix_str(f"len: {np.mean(cur_lengths):.1f} | {len(cur_prompts)/(time.time()-start):.1f} tok/s (resampled {np.mean(enable_mask):.0%})")
     pbar.close()
 
     all_info, avg_accs, avg_resampled = [], [], []
