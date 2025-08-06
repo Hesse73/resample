@@ -46,7 +46,8 @@ if __name__ == "__main__":
 
     # Load models
     llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_util, enable_prefix_caching=True, 
-              enforce_eager=True, tensor_parallel_size=args.tp_size, max_logprobs=args.logprobs)
+              enforce_eager=True, tensor_parallel_size=args.tp_size, max_logprobs=args.logprobs,
+              max_num_batched_tokens=327680)
     sp = SamplingParams(
         n=args.n,
         temperature=args.temperature,
