@@ -76,8 +76,8 @@ def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:f
             logp_diff = logp_main - logp_assistant
             enabled = logp_diff <= threshold if criteria == "logp" else -logp_diff <= threshold
             enable_mask.append(enabled)
-        elif criteria == "js":
-            # JS divergence
+        elif criteria in ['kl', 'kl_r' ,'js']:
+            # KL, Reversed KL, and JS divergence
             def kl_divergence(lp_info, lp_info_assistant):
                 token_ids, logprobs = [key for key in lp_info], np.array([lp.logprob for lp in lp_info.values()])
                 logp_map_assistant = {key: lp.logprob for key, lp in lp_info_assistant.items()}
@@ -92,7 +92,12 @@ def get_enable_mask(outputs, outputs_assistant, criteria:str="none", threshold:f
             kl_main = kl_divergence(lp_info, lp_info_assistant)
             kl_assistant = kl_divergence(lp_info_assistant, lp_info)
             js_divergence = 0.5 * (kl_main + kl_assistant)
-            enable_mask.append(js_divergence >= threshold)
+            if criteria == 'kl':
+                enable_mask.append(kl_assistant >= threshold)
+            elif criteria == 'kl_r':
+                enable_mask.append(kl_main >= threshold)
+            elif criteria == 'js':
+                enable_mask.append(js_divergence >= threshold)
         elif criteria == "none":
             enable_mask.append(False)
         elif criteria == "all":
@@ -212,7 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=float, nargs=2, default=(1.0, 0.0), 
                         help="Weights for the two models' logprobs, e.g., 1.05 -0.05")
     # whether to enable the assistant's logprobs
-    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all", "rand", "js"])
+    parser.add_argument("--criteria", type=str, default="none", choices=["entropy", "logp", "neg_logp", "none", "all", "rand", "js", "kl", "kl_r"])
     parser.add_argument("--threshold", type=float, default=1.0, help="Threshold for the criteria")
     # other args
     parser.add_argument("--save_dir", type=str, default="results", help="Directory to save results")
@@ -231,7 +236,12 @@ if __name__ == "__main__":
     print(f"Results will be saved to {os.path.join(args.save_dir, save_path)}")
     
     # Load dataset
-    ds = datasets.load_dataset(args.dataset, split='train')
+    if 'aime24' in args.dataset:
+        ds = datasets.load_dataset(args.dataset, split='train')
+    elif 'aime25' in args.dataset:
+        ds = datasets.load_dataset(args.dataset, split='test')
+    else:
+        raise ValueError(f"Unknown dataset: {args.dataset}")
     prompts, gts = ds['problem'], ds['answer']
 
     # Load models

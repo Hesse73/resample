@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
 
     args = parser.parse_args()
-    save_path = f'_test_results/{args.model.split("/")[-1]}_results.json'
+    save_path = f'_test_results/{args.model.split("/")[-1]}_{args.dataset.split("/")[-1]}_results.json'
     if os.path.exists(save_path):
         print(f"Results already exist at {save_path}. Skipping evaluation.")
         # load existing results
@@ -35,7 +35,12 @@ if __name__ == "__main__":
         sys.exit(0)
 
     # Load dataset
-    ds = datasets.load_dataset(args.dataset, split='train')
+    if 'aime24' in args.dataset:
+        ds = datasets.load_dataset(args.dataset, split='train')
+    elif 'aime25' in args.dataset:
+        ds = datasets.load_dataset(args.dataset, split='test')
+    else:
+        raise ValueError(f"Unsupported dataset: {args.dataset}")
     prompts, gts = ds['problem'], ds['answer']
 
 
