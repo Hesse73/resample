@@ -31,7 +31,7 @@ if __name__ == "__main__":
         # load existing results
         infos = json.load(open(save_path, 'r'))
         avg_acc = np.mean([info['accs'] for info in infos])
-        print(f"Average accuracy from existing results: {avg_acc:.2f}")
+        print(f"Average accuracy from existing results: {avg_acc:.4f}")
         sys.exit(0)
 
     # Load dataset
@@ -80,7 +80,7 @@ if __name__ == "__main__":
         avg_accs.append(np.mean(accs))
     
     avg_acc = np.mean(avg_accs)
-    print(f"Average accuracy: {avg_acc:.2f}")
+    print(f"Average accuracy: {avg_acc:.4f}")
     
     # Save results
     json.dump(infos, open(save_path, 'w'), indent=4)
